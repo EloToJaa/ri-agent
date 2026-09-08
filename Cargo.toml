@@ -8,11 +8,32 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.96"
 
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+panic = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "warn"
+
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
 [package]
 name = "ri-agent"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 ri-agent-lua = { path = "crates/lua" }
