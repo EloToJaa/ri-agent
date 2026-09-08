@@ -2,12 +2,12 @@ use anyhow::Result;
 use std::num::NonZeroUsize;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-pub(crate) const MAX_TURNS: NonZeroUsize = NonZeroUsize::new(20).unwrap();
+pub const MAX_TURNS: NonZeroUsize = NonZeroUsize::new(20).unwrap();
 
 #[derive(Clone, Copy)]
-pub(crate) struct Limits {
-    pub(crate) command_timeout: std::time::Duration,
-    pub(crate) max_output_bytes: NonZeroUsize,
+pub struct Limits {
+    pub command_timeout: std::time::Duration,
+    pub max_output_bytes: NonZeroUsize,
 }
 
 impl Default for Limits {

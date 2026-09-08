@@ -1,6 +1,6 @@
 use crate::{message::Message, response::Response, tools};
 use anyhow::{Result, bail};
-use tokio::io::{self, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TurnOutcome {
@@ -11,6 +11,8 @@ pub(crate) enum TurnOutcome {
 pub(crate) struct ResponseProcessor {
     response: Response,
     limits: crate::limits::Limits,
+    output: crate::events::Output,
+    lua: Option<std::sync::Arc<crate::config::LuaConfig>>,
 }
 
 impl ResponseProcessor {
@@ -19,18 +21,27 @@ impl ResponseProcessor {
         self
     }
 
+    pub(crate) fn with_runtime(
+        mut self,
+        output: crate::events::Output,
+        lua: std::sync::Arc<crate::config::LuaConfig>,
+    ) -> Self {
+        self.output = output;
+        self.lua = Some(lua);
+        self
+    }
+
     pub(crate) fn new(response: Response) -> Self {
         Self {
             response,
             limits: crate::limits::Limits::default(),
+            output: crate::events::Output::default(),
+            lua: None,
         }
     }
 
     pub(crate) async fn process(&self, messages: &mut Vec<Message>) -> Result<TurnOutcome> {
-        let mut output = io::stdout();
-        let outcome = self.process_to(messages, &mut output).await?;
-        output.flush().await?;
-        Ok(outcome)
+        self.process_to(messages, &mut tokio::io::sink()).await
     }
 
     async fn process_to(
@@ -42,20 +53,38 @@ impl ResponseProcessor {
             bail!("Response contains no choices");
         };
 
+        let content = match (&self.lua, &choice.message.content) {
+            (Some(lua), Some(content)) => Some(lua.hook("after_response", content.clone()).await?),
+            _ => choice.message.content.clone(),
+        };
+        if let Some(text) = &content {
+            self.output
+                .emit(crate::events::Event::Assistant(text.clone()));
+        }
         messages.push(Message::Assistant {
-            content: choice.message.content.clone(),
+            content: content.clone(),
             tool_calls: choice.message.tool_calls.clone(),
         });
 
         if choice.message.tool_calls.is_empty() {
-            if let Some(content) = &choice.message.content {
+            if let Some(content) = &content {
                 output.write_all(format!("{content}\n").as_bytes()).await?;
             }
             return Ok(TurnOutcome::Finished);
         }
 
-        let results = tools::execute_batch(&choice.message.tool_calls, self.limits).await;
+        let results = tools::execute_batch(
+            &choice.message.tool_calls,
+            self.limits,
+            &self.output,
+            self.lua.as_ref(),
+        )
+        .await;
         for (call, contents) in choice.message.tool_calls.iter().zip(results) {
+            self.output.emit(crate::events::Event::Tool(format!(
+                "{} ({}):\n{}",
+                call.function.name, call.id, contents
+            )));
             messages.push(Message::Tool {
                 tool_call_id: call.id.clone(),
                 content: contents,

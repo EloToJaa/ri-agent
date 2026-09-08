@@ -1,80 +1,99 @@
 # ri-agent
 
-A Rust command-line agent that sends a prompt to an OpenRouter-compatible model and executes local tools to complete the task. Built with Tokio and `async-openai`, it supports reading files, writing files, and running Bash commands across multiple model turns.
-
-The Cargo package and executable are currently named `codecrafters-claude-code`.
+An asynchronous Rust agent harness with a Ratatui terminal interface, a one-shot CLI, and Lua configuration/hooks/custom tools. It uses an OpenRouter-compatible API and can read files, write files, and execute Bash locally.
 
 ## Getting started
-
-With Nix installed and flakes enabled, run from this repository:
 
 ```sh
 nix develop
 export OPENROUTER_API_KEY='your-api-key'
-cargo run -- -p "Read Cargo.toml and explain this project's dependencies"
+cargo run -p ri-agent-cli                     # Interactive TUI
+cargo run -p ri-agent-cli -- -p "Explain src/agent.rs"  # One-shot CLI
+cargo run -p ri-agent-cli -- --tui -p "Inspect this project"
 ```
 
-The development shell supplies Rust, Cargo, formatting and linting tools, and native build dependencies. It also sets `MODEL=minimax/minimax-m3:free`; override it with `--model` or set `MODEL` after entering the shell.
+The executable retains its original name, `codecrafters-claude-code`. Without Nix, install Rust 1.96+, a C compiler (for vendored Lua), and Bash. The Nix shell sets `MODEL=minimax/minimax-m3:free`; unset it to use the model from Lua, or override it with `--model`.
 
-Without Nix, use Rust 1.96 or newer, Cargo, and the native dependencies required by OpenSSL, including `pkg-config`. Bash must be available on `PATH` for the Bash tool.
+### Interactive interface
 
-## Usage
+The TUI keeps conversation history across prompts and shows assistant responses, tool results, and model/tool activity. Responses appear when complete, not token-by-token.
+
+- **Enter**: send a prompt when idle. You can draft the next prompt while the agent works.
+- **Backspace**: delete the last character/grapheme.
+- **Page Up / Page Down**: scroll the transcript.
+- **Ctrl+L**: start a new conversation when idle.
+- **Ctrl+C**: quit and drop the active agent turn. Already-applied tool effects remain.
+
+The visible transcript retains up to 4,000 lines; model conversation history remains intact until cleared. Failed turns are removed from model history, without undoing local tool effects. The TUI requires a terminal; use `-p` for scripts and pipes.
+
+## Lua configuration
+
+The harness loads `$XDG_CONFIG_HOME/ri-agent/config.lua`, or `~/.config/ri-agent/config.lua` when XDG_CONFIG_HOME is unset. A missing default file is fine. `--config PATH` loads an explicit file and reports missing-file or Lua errors. Project-local configuration is **never loaded automatically**.
+
+Start with [examples/config.lua](examples/config.lua):
 
 ```sh
-cargo run -- --help
-cargo run -- -p "Explain src/agent.rs" --model anthropic/claude-haiku-4.5
-cargo run -- -p "Inspect the project" \
-  --max-turns 10 --command-timeout 30 --max-output-bytes 16384
+mkdir -p ~/.config/ri-agent
+cp examples/config.lua ~/.config/ri-agent/config.lua
+cargo run -p ri-agent-cli -- --config examples/config.lua
 ```
 
-| Option | Purpose | Default |
-| --- | --- | --- |
-| `-p`, `--prompt` | Task to send to the model | Required |
-| `--model` | Model identifier; overrides `MODEL` | `MODEL`, otherwise `anthropic/claude-haiku-4.5` |
-| `--max-turns` | Maximum model turns | `20` |
-| `--command-timeout` | Timeout per Bash call, in seconds | `60` |
-| `--max-output-bytes` | Retained bytes per file read or Bash output stream | `32768` |
+The file returns a table with:
 
-All numeric limits must be greater than zero. Truncated tool output includes an `[output truncated]` marker.
+- `settings`: `model`, `base_url`, `max_turns`, `command_timeout`, `max_output_bytes`.
+- `hooks.before_prompt(text)`: transform each submitted user prompt.
+- `hooks.after_response(text)`: transform assistant text before display and storage, including text accompanying tool calls.
+- `tools`: an array of `{ name, description, parameters, execute }`. `parameters` is an object JSON schema; `execute(args)` receives decoded JSON arguments. Return a string or a JSON-serializable Lua value. Validate arguments inside the tool; schemas are advertised to the model, not enforced locally. Names cannot shadow built-ins or each other.
 
-### Configuration
+Hooks return a replacement string or `nil` to leave text unchanged. Hook errors fail the current turn. Tool errors are returned to the model for recovery. Custom tool results are capped by `max_output_bytes` before entering model history.
 
-`OPENROUTER_API_KEY` is required. `OPENROUTER_BASE_URL` optionally replaces the default API endpoint, `https://openrouter.ai/api/v1`. Credentials are read from the environment; keep them out of committed files.
+**Lua is trusted executable code, not a sandbox.** It can access local files, environment variables, and processes. Callbacks run on blocking threads, but have no execution timeout and cannot be forcibly cancelled; a blocked callback can delay process exit. `command_timeout` applies only to built-in Bash. Keep callbacks finite, avoid terminal writes (`print`, `io.write`, subprocess output) while using the TUI, and do not load untrusted configuration. No credentials belong in configuration files; use `OPENROUTER_API_KEY`.
 
-### Tools
+### Options and precedence
 
-- **Read** returns file contents, subject to the output limit.
-- **Write** creates or overwrites a file. Its parent directory must already exist.
-- **Bash** runs a command in a fresh, noninteractive shell and returns stdout, stderr, and exit status. Shell state does not persist between calls.
+CLI flags override environment variables (`MODEL`, `OPENROUTER_BASE_URL`), which override Lua settings, which override built-in defaults.
 
-Consecutive Read calls can run concurrently, up to four at a time. Write and Bash calls execute sequentially. Tool errors are returned to the model so it can attempt recovery.
+| Option | Default |
+| --- | --- |
+| `-p`, `--prompt` | No prompt opens the TUI |
+| `--tui` | Force TUI, optionally with an initial `-p` prompt |
+| `--config` | User config path described above |
+| `--model` | `anthropic/claude-haiku-4.5` |
+| `--base-url` | `https://openrouter.ai/api/v1` |
+| `--max-turns` | `20` per submitted prompt |
+| `--command-timeout` | `60` seconds per Bash call |
+| `--max-output-bytes` | `32768` retained bytes per Read, Bash stream, or Lua tool result |
 
-Tools use the process's working directory and permissions. The agent executes tool calls without an approval prompt or built-in filesystem sandbox; file contents and command output may be sent to the configured model provider.
+All numeric limits must be positive. Truncation adds an `[output truncated]` marker.
+
+## Tools and security
+
+- **Read**: read a file, subject to the output limit.
+- **Write**: create or overwrite a file; the parent directory must exist.
+- **Bash**: run a command in a fresh noninteractive shell, returning stdout, stderr, and exit status. Shell state does not persist.
+
+Consecutive Read calls run concurrently (up to four). Mutating and Lua tools run sequentially. Tools operate with the process's working directory and permissions, **without approval prompts or filesystem sandboxing**. File contents and command output can be sent to the model provider.
+
+## Workspace
+
+```text
+src/           ri-agent       Main library: sessions, protocol, events, built-in tools
+crates/lua/    ri-agent-lua   Lua settings, hooks, custom-tool runtime
+crates/tui/    ri-agent-tui   Ratatui interface using the main library
+crates/cli/    ri-agent-cli   CLI configuration and interface selection
+```
+
+The main library re-exports the Lua crate as `ri_agent::config`. Frontends use `Session` and an event channel (`Output::channel`); `Output::default` writes CLI output. Sessions own conversation history and expose `submit` and `clear`.
 
 ## Development
 
 Inside `nix develop`:
 
 ```sh
-cargo build
-cargo test
-cargo test --test agent_loop
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
+cargo build --workspace
+cargo test --workspace
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Unit tests live alongside the source. Integration tests in `tests/agent_loop.rs` run the CLI against a local mock HTTP server and do not require live API credentials. They do not verify live provider behavior.
-
-Use `nix build` to build the packaged executable at `result/bin/codecrafters-claude-code`, and `nix fmt` to format Nix files.
-
-## Project structure
-
-- `src/main.rs`: CLI arguments and API client configuration.
-- `src/agent.rs`: model/tool conversation loop.
-- `src/message.rs`, `src/response.rs`, `src/response_processor.rs`: protocol types and response handling.
-- `src/tools/`: tool registry and implementations.
-- `src/limits.rs`: execution limits and output truncation.
-- `tests/agent_loop.rs`: integration tests.
-- `flake.nix`: Nix development and build setup.
-
-See [AGENTS.md](AGENTS.md) for contributor guidelines.
+Tests cover local tools, Lua validation/hooks/tools, TUI state/rendering, and mock-HTTP agent sessions. They need no live credentials and do not verify live-provider compatibility. `nix build` packages `result/bin/codecrafters-claude-code`; run `nix fmt` after editing Nix files.

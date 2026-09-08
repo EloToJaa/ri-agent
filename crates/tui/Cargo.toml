@@ -1,0 +1,15 @@
+[package]
+name = "ri-agent-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ri-agent = { path = "../.." }
+anyhow = "1"
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+futures-util = "0.3"
+unicode-width = "0.2"
+unicode-segmentation = "1"
+tokio = { version = "1", features = ["sync", "rt", "macros"] }

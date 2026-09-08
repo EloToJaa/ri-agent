@@ -2,13 +2,16 @@
 
 ## Project Structure & Module Organization
 
-This repository implements an asynchronous Rust CLI agent using an OpenRouter-compatible API. The Cargo package and binary are currently named `codecrafters-claude-code`.
+This repository implements an asynchronous Rust agent harness using an OpenRouter-compatible API. The workspace contains `ri-agent` (main library), `ri-agent-lua`, `ri-agent-tui`, and `ri-agent-cli`. The executable retains the name `codecrafters-claude-code`.
 
-- `src/main.rs` defines CLI arguments and client configuration.
+- `crates/cli/src/main.rs` defines CLI arguments, configuration precedence, and frontend selection.
+- `crates/tui/src/lib.rs` owns Ratatui rendering and terminal input.
+- `crates/lua/src/lib.rs` loads trusted user configuration and runs hooks/custom tools.
+- `src/lib.rs` exposes sessions, events, limits, and Lua configuration.
 - `src/agent.rs` manages the conversation loop; `message.rs`, `response.rs`, and `response_processor.rs` define and process protocol data.
 - `src/tools/` contains the `Tool` trait, shared registry, and Read, Write, and Bash implementations. Register new tools in `TOOLS` so definitions and execution stay aligned.
 - `src/limits.rs` centralizes execution limits.
-- Unit tests live alongside implementation code; `tests/agent_loop.rs` exercises the binary against a local mock HTTP server.
+- Unit tests live alongside implementation code; `crates/cli/tests/agent_loop.rs` exercises the binary against a local mock HTTP server.
 - `flake.nix` supplies the development shell, package build, and Nix formatter.
 
 ## Build, Test, and Development Commands
@@ -21,7 +24,7 @@ cargo test                             # Run unit and integration tests
 cargo test --test agent_loop           # Run mock API integration tests
 cargo fmt --check                      # Check Rust formatting
 cargo clippy --all-targets -- -D warnings
-cargo run -- -p "Describe this project" # Run using configured credentials
+cargo run -p ri-agent-cli -- -p "Describe this project" # Run using configured credentials
 ```
 
 Use `nix build` for the Nix package and `nix fmt` after editing Nix files.

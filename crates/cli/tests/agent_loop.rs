@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn run(responses: Vec<Value>, max_turns: usize) -> (Output, Vec<Value>) {
+fn server(responses: Vec<Value>) -> (std::net::SocketAddr, thread::JoinHandle<Vec<Value>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
@@ -54,9 +54,15 @@ fn run(responses: Vec<Value>, max_turns: usize) -> (Output, Vec<Value>) {
         }
         requests
     });
+    (address, server)
+}
+
+fn run(responses: Vec<Value>, max_turns: usize) -> (Output, Vec<Value>) {
+    let (address, server) = server(responses);
     let mut child = Command::new(env!("CARGO_BIN_EXE_codecrafters-claude-code"))
         .args(["-p", "Read a file", "--max-turns", &max_turns.to_string()])
         .env("MODEL", "mock-model")
+        .env("XDG_CONFIG_HOME", "/nonexistent-ri-agent-test-config")
         .env("OPENROUTER_API_KEY", "mock-key")
         .env("OPENROUTER_BASE_URL", format!("http://{address}"))
         .env("NO_PROXY", "127.0.0.1")
@@ -86,7 +92,7 @@ fn tool(arguments: Value) -> Value {
 #[test]
 fn completes_a_tool_round_trip_and_recovers_from_errors() {
     for arguments in [
-        json!({"file_path": concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml")}),
+        json!({"file_path": concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml")}),
         json!({}),
     ] {
         let invalid = arguments.get("file_path").is_none();
@@ -120,8 +126,78 @@ fn completes_a_tool_round_trip_and_recovers_from_errors() {
             assert!(content.contains("Invalid Read arguments"));
             continue;
         }
-        assert_eq!(content, include_str!("../Cargo.toml"));
+        assert_eq!(content, include_str!("../../../Cargo.toml"));
     }
+}
+
+#[tokio::test]
+async fn session_retains_history_runs_lua_tools_and_recovers_after_failed_turns() {
+    use ri_agent::{
+        agent::{AgentConfig, Session},
+        config::LuaConfig,
+        events::{Event, Output},
+        limits::Limits,
+    };
+    let lua = LuaConfig::from_source(
+        r#"return {
+        hooks = {
+            before_prompt = function(text) return 'task: ' .. text end,
+            after_response = function(text) return text .. '!' end,
+        },
+        tools = {{ name = 'Echo', description = 'Echo',
+            parameters = {type = 'object'},
+            execute = function(args) return args.text end }},
+    }"#,
+        "test",
+    )
+    .unwrap();
+    let (address, server) = server(vec![
+        json!({"choices":[{"message":{"tool_calls":[{
+            "id":"echo_1", "type":"function", "function":{
+                "name":"Echo", "arguments":"{\"text\":\"hello\"}"
+            }
+        }]}}]}),
+        json!({"choices":[{"message":{"content":"Done"}}]}),
+        json!({"choices":[]}),
+        json!({"choices":[{"message":{"content":"Follow up"}}]}),
+        json!({"choices":[{"message":{"content":"New chat"}}]}),
+    ]);
+    let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let mut session = Session::new(
+        format!("http://{address}"),
+        "mock-key".into(),
+        AgentConfig {
+            model: "mock-model".into(),
+            max_turns: std::num::NonZeroUsize::new(3).unwrap(),
+            limits: Limits::default(),
+            lua,
+        },
+        Output::channel(sender),
+    );
+    session.submit("first".into()).await.unwrap();
+    assert!(session.submit("failed".into()).await.is_err());
+    session.submit("second".into()).await.unwrap();
+    session.clear();
+    session.submit("fresh".into()).await.unwrap();
+    let requests = server.join().unwrap();
+    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 4);
+    assert_eq!(requests[0]["messages"][0]["content"], "task: first");
+    assert_eq!(requests[1]["messages"][2]["content"], "hello");
+    assert_eq!(requests[3]["messages"].as_array().unwrap().len(), 5);
+    assert_eq!(requests[3]["messages"][3]["content"], "Done!");
+    assert_eq!(requests[3]["messages"][4]["content"], "task: second");
+    assert_eq!(requests[4]["messages"].as_array().unwrap().len(), 1);
+    let mut assistant = Vec::new();
+    let mut tools = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        match event {
+            Event::Assistant(text) => assistant.push(text),
+            Event::Tool(text) => tools.push(text),
+            _ => {}
+        }
+    }
+    assert_eq!(assistant, ["Done!", "Follow up!", "New chat!"]);
+    assert!(tools[0].contains("hello"));
 }
 
 #[test]

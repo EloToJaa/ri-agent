@@ -1,5 +1,5 @@
 {
-  description = "CodeCrafters Claude Code Rust project";
+  description = "Lua-configurable Rust agent harness with CLI and Ratatui interfaces";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -27,6 +27,13 @@
       {
         packages.default = naerskLib.buildPackage {
           src = pkgs.lib.cleanSource ./.;
+          cargoBuildOptions =
+            options:
+            options
+            ++ [
+              "-p"
+              "ri-agent-cli"
+            ];
           nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = [ pkgs.openssl ];
         };

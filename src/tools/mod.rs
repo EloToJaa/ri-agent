@@ -34,8 +34,13 @@ pub(crate) struct FunctionDefinition {
     parameters: Value,
 }
 
-pub(crate) async fn execute_batch(calls: &[ToolCall], limits: Limits) -> Vec<String> {
-    execute_batch_with(calls, |call| execute(call, limits))
+pub(crate) async fn execute_batch(
+    calls: &[ToolCall],
+    limits: Limits,
+    output: &crate::events::Output,
+    lua: Option<&std::sync::Arc<crate::config::LuaConfig>>,
+) -> Vec<String> {
+    execute_batch_with(calls, |call| execute_with(call, limits, output, lua))
         .await
         .into_iter()
         .map(|result| {
@@ -89,14 +94,44 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) async fn execute(call: &ToolCall, limits: Limits) -> Result<String> {
-    eprintln!("Running {} ({})...", call.function.name, call.id);
-    let result = execute_inner(call, limits).await;
+    execute_with(call, limits, &crate::events::Output::default(), None).await
+}
+
+async fn execute_with(
+    call: &ToolCall,
+    limits: Limits,
+    output: &crate::events::Output,
+    lua: Option<&std::sync::Arc<crate::config::LuaConfig>>,
+) -> Result<String> {
+    output.emit(crate::events::Event::Progress(format!(
+        "Running {} ({})...",
+        call.function.name, call.id
+    )));
+    let result = async {
+        if call.r#type == "function"
+            && let Some(lua) = lua.filter(|lua| lua.has_tool(&call.function.name))
+        {
+            let arguments = call
+                .function
+                .arguments
+                .clone()
+                .context("Missing Lua tool arguments")?;
+            let result = lua.execute(call.function.name.clone(), arguments).await?;
+            return crate::limits::read_output(result.as_bytes(), limits.max_output_bytes).await;
+        }
+        execute_inner(call, limits).await
+    }
+    .await;
     let status = match &result {
         Ok(_) => "completed",
         Err(_) => "failed",
     };
-    eprintln!("{} ({}) {status}", call.function.name, call.id);
+    output.emit(crate::events::Event::Progress(format!(
+        "{} ({}) {status}",
+        call.function.name, call.id
+    )));
     result
 }
 
