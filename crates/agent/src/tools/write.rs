@@ -58,14 +58,11 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[tokio::test]
-    async fn creates_and_overwrites_a_file() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+    async fn creates_and_overwrites_a_file() -> anyhow::Result<()> {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let directory =
             std::env::temp_dir().join(format!("write-tool-{}-{unique}", std::process::id()));
-        fs::create_dir(&directory).await.unwrap();
+        fs::create_dir(&directory).await?;
         let path = directory.join("output.txt");
 
         for content in ["Hello, world!", "Short", ""] {
@@ -75,12 +72,13 @@ mod tests {
                     Limits::default(),
                 )
                 .await;
-            assert_eq!(result.unwrap(), "File written successfully");
-            assert_eq!(fs::read_to_string(&path).await.unwrap(), content);
+            assert_eq!(result?, "File written successfully");
+            assert_eq!(fs::read_to_string(&path).await?, content);
         }
 
-        fs::remove_file(&path).await.unwrap();
-        fs::remove_dir(&directory).await.unwrap();
+        fs::remove_file(&path).await?;
+        fs::remove_dir(&directory).await?;
+        Ok(())
     }
 
     #[tokio::test]

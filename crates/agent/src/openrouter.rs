@@ -38,10 +38,7 @@ pub enum SupportedEfforts {
 
 impl<'de> Deserialize<'de> for SupportedEfforts {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Ok(match Option::<Vec<String>>::deserialize(deserializer)? {
-            Some(levels) => Self::Levels(levels),
-            None => Self::All,
-        })
+        Ok(Option::<Vec<String>>::deserialize(deserializer)?.map_or(Self::All, Self::Levels))
     }
 }
 

@@ -58,15 +58,16 @@ impl Tool for Bash {
                 .context("Failed to execute Bash command")?;
             let stdout = child.stdout.take().context("Missing Bash stdout")?;
             let stderr = child.stderr.take().context("Missing Bash stderr")?;
-            let (status, stdout, stderr) = tokio::time::timeout(limits.command_timeout, async {
-                tokio::try_join!(
-                    async { child.wait().await.context("Failed to wait for Bash") },
-                    crate::limits::read_output(stdout, limits.max_output_bytes),
-                    crate::limits::read_output(stderr, limits.max_output_bytes),
-                )
-            })
-            .await
-            .context("Bash command timed out")??;
+            let (status, stdout, stderr) =
+                Box::pin(tokio::time::timeout(limits.command_timeout, async {
+                    tokio::try_join!(
+                        async { child.wait().await.context("Failed to wait for Bash") },
+                        crate::limits::read_output(stdout, limits.max_output_bytes),
+                        crate::limits::read_output(stderr, limits.max_output_bytes),
+                    )
+                }))
+                .await
+                .context("Bash command timed out")??;
 
             // A failed command is a tool result the model can inspect and act on.
             serde_json::to_string(&BashOutput {
@@ -84,46 +85,47 @@ impl Tool for Bash {
 mod tests {
     use super::*;
 
-    async fn execute(command: &str) -> Value {
-        serde_json::from_str(
+    async fn execute(command: &str) -> anyhow::Result<Value> {
+        Ok(serde_json::from_str(
             &Bash
                 .execute(&json!({"command": command}).to_string(), Limits::default())
-                .await
-                .unwrap(),
-        )
-        .unwrap()
+                .await?,
+        )?)
     }
 
     #[tokio::test]
-    async fn executes_shell_syntax_and_captures_stdout() {
+    async fn executes_shell_syntax_and_captures_stdout() -> anyhow::Result<()> {
         let output = execute(
             "value=hello; printf '%s' \"$value\" | while read -r -n 1 char; do printf '%s' \"$char\"; done",
-        ).await;
+        ).await?;
         assert_eq!(
             output,
             json!({"stdout": "hello", "stderr": "", "exit_code": 0, "success": true})
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn returns_stderr_and_nonzero_status_as_a_tool_result() {
-        let output = execute("printf 'failed' >&2; exit 7").await;
+    async fn returns_stderr_and_nonzero_status_as_a_tool_result() -> anyhow::Result<()> {
+        let output = execute("printf 'failed' >&2; exit 7").await?;
         assert_eq!(
             output,
             json!({"stdout": "", "stderr": "failed", "exit_code": 7, "success": false})
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn times_out_and_caps_command_output() {
+    async fn times_out_and_caps_command_output() -> anyhow::Result<()> {
         let limits = Limits {
             command_timeout: std::time::Duration::from_millis(50),
-            max_output_bytes: std::num::NonZeroUsize::new(3).unwrap(),
+            max_output_bytes: std::num::NonZeroUsize::MIN.saturating_add(2),
         };
         let error = Bash
             .execute(r#"{"command":"exec sleep 5"}"#, limits)
             .await
-            .unwrap_err();
+            .err()
+            .context("Expected a timeout")?;
         assert!(error.to_string().contains("timed out"));
         let result = Bash
             .execute(
@@ -133,11 +135,17 @@ mod tests {
                     ..limits
                 },
             )
-            .await
-            .unwrap();
-        let result: Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(result["stdout"], "abc\n[output truncated]");
-        assert_eq!(result["stderr"], "ghi\n[output truncated]");
+            .await?;
+        let result: Value = serde_json::from_str(&result)?;
+        assert_eq!(
+            result.get("stdout"),
+            Some(&json!("abc\n[output truncated]"))
+        );
+        assert_eq!(
+            result.get("stderr"),
+            Some(&json!("ghi\n[output truncated]"))
+        );
+        Ok(())
     }
 
     #[tokio::test]

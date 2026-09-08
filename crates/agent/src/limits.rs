@@ -33,7 +33,7 @@ pub(crate) async fn read_output(
             break;
         }
         let keep = count.min(cap.get().saturating_sub(output.len()));
-        output.extend_from_slice(&buffer[..keep]);
+        output.extend(buffer.iter().take(keep));
         truncated |= keep < count;
     }
     let mut text = String::from_utf8_lossy(&output).into_owned();
@@ -48,18 +48,13 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn caps_output_and_marks_truncation() {
+    async fn caps_output_and_marks_truncation() -> Result<()> {
+        let cap = NonZeroUsize::MIN.saturating_add(2);
         assert_eq!(
-            read_output(&b"abcdef"[..], NonZeroUsize::new(3).unwrap())
-                .await
-                .unwrap(),
+            read_output(b"abcdef".as_slice(), cap).await?,
             "abc\n[output truncated]"
         );
-        assert_eq!(
-            read_output(&b"abc"[..], NonZeroUsize::new(3).unwrap())
-                .await
-                .unwrap(),
-            "abc"
-        );
+        assert_eq!(read_output(b"abc".as_slice(), cap).await?, "abc");
+        Ok(())
     }
 }

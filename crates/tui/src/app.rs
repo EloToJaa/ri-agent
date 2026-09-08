@@ -302,6 +302,32 @@ impl App {
         );
     }
 
+    fn wrapped_transcript(&self, width: usize) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
+        for line in &self.lines {
+            let text = line.to_string();
+            if text.is_empty() {
+                lines.push(Line::default());
+                continue;
+            }
+            let mut part = String::new();
+            let mut count = 0;
+            for grapheme in text.graphemes(true) {
+                let cells = grapheme.width();
+                if count + cells > width && !part.is_empty() {
+                    lines.push(Line::from(std::mem::take(&mut part)).style(line.style));
+                    count = 0;
+                }
+                part.push_str(grapheme);
+                count += cells;
+            }
+            if !part.is_empty() {
+                lines.push(Line::from(part).style(line.style));
+            }
+        }
+        lines
+    }
+
     pub fn draw(&self, frame: &mut Frame) {
         let [header, selection, transcript, status, input, help] = Layout::vertical([
             Constraint::Length(1),
@@ -337,29 +363,7 @@ impl App {
             .bold(),
             selection,
         );
-        let width = usize::from(transcript.width.max(1));
-        let mut lines = Vec::new();
-        for line in &self.lines {
-            let text = line.to_string();
-            if text.is_empty() {
-                lines.push(Line::default());
-                continue;
-            }
-            let mut part = String::new();
-            let mut count = 0;
-            for grapheme in text.graphemes(true) {
-                let cells = grapheme.width();
-                if count + cells > width && !part.is_empty() {
-                    lines.push(Line::from(std::mem::take(&mut part)).style(line.style));
-                    count = 0;
-                }
-                part.push_str(grapheme);
-                count += cells;
-            }
-            if !part.is_empty() {
-                lines.push(Line::from(part).style(line.style));
-            }
-        }
+        let lines = self.wrapped_transcript(usize::from(transcript.width.max(1)));
         let start = lines
             .len()
             .saturating_sub(usize::from(transcript.height))

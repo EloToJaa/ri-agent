@@ -58,14 +58,14 @@ where
     Fut: Future<Output = Result<String>>,
 {
     let mut results = Vec::with_capacity(calls.len());
-    while !calls.is_empty() {
+    while let Some((first, rest)) = calls.split_first() {
         let reads = calls
             .iter()
             .take_while(|call| call.r#type == "function" && call.function.name == "Read")
             .count();
         if reads == 0 {
-            results.push(execute(&calls[0]).await);
-            calls = &calls[1..];
+            results.push(execute(first).await);
+            calls = rest;
             continue;
         }
         let (batch, rest) = calls.split_at(reads);
@@ -160,7 +160,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn overlaps_reads_with_a_bound_and_serializes_mutations() {
+    async fn overlaps_reads_with_a_bound_and_serializes_mutations() -> Result<()> {
         use std::cell::{Cell, RefCell};
         let names = [
             "Read", "Read", "Read", "Read", "Read", "Write", "Read", "Bash", "Read",
@@ -171,9 +171,9 @@ mod tests {
             .map(|(id, name)| {
                 serde_json::from_value(json!({
             "id": id.to_string(), "type": "function", "function": {"name": name, "arguments": "{}"}
-        })).unwrap()
+        }))
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
         let active = Cell::new(0);
         let peak = Cell::new(0);
         let completed = RefCell::new(Vec::new());
@@ -182,7 +182,7 @@ mod tests {
             let peak = &peak;
             let completed = &completed;
             async move {
-                let id: usize = call.id.parse().unwrap();
+                let id: usize = call.id.parse()?;
                 if call.function.name != "Read" {
                     assert_eq!(active.get(), 0);
                     assert_eq!(completed.borrow().len(), id);
@@ -204,36 +204,41 @@ mod tests {
         .await;
         assert_eq!(peak.get(), 4);
         assert_eq!(
-            results.into_iter().map(Result::unwrap).collect::<Vec<_>>(),
+            results.into_iter().collect::<Result<Vec<_>>>()?,
             calls.iter().map(|call| call.id.clone()).collect::<Vec<_>>()
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn advertised_read_tool_can_be_executed() {
+    async fn advertised_read_tool_can_be_executed() -> Result<()> {
         let definition = definitions()
             .into_iter()
-            .map(|definition| serde_json::to_value(definition).unwrap())
-            .find(|definition| definition["function"]["name"] == "Read")
-            .unwrap();
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .find(|definition| {
+                definition.pointer("/function/name").and_then(Value::as_str) == Some("Read")
+            })
+            .context("Missing Read definition")?;
         assert_eq!(
-            definition["function"]["parameters"]["required"],
-            json!(["file_path"])
+            definition.pointer("/function/parameters/required"),
+            Some(&json!(["file_path"]))
         );
         let call: ToolCall = serde_json::from_value(json!({
             "id": "read_1",
-            "type": definition["type"],
+            "type": definition.get("type"),
             "function": {
-                "name": definition["function"]["name"],
+                "name": definition.pointer("/function/name"),
                 "arguments": json!({
                     "file_path": concat!(env!("CARGO_MANIFEST_DIR"), "/src/tools/read.rs")
                 }).to_string()
             }
-        }))
-        .unwrap();
+        }))?;
         assert_eq!(
-            execute(&call, Limits::default()).await.unwrap(),
+            execute(&call, Limits::default()).await?,
             include_str!("read.rs")
         );
+        Ok(())
     }
 }

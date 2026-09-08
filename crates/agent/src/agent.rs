@@ -70,6 +70,7 @@ impl Session {
         }
     }
 
+    #[must_use]
     pub fn with_store(mut self, store: SessionStore) -> Self {
         self.store = Some(store);
         self
@@ -155,7 +156,7 @@ impl Session {
                     tool_call_id,
                     content,
                 } => Some(Event::Tool(format!("{tool_call_id}:\n{content}"))),
-                _ => None,
+                Message::Assistant { .. } => None,
             })
             .collect()
     }

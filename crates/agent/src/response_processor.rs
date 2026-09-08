@@ -100,29 +100,30 @@ impl ResponseProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context;
     use serde_json::json;
 
-    fn processor(message: serde_json::Value) -> ResponseProcessor {
-        ResponseProcessor::new(
-            serde_json::from_value(json!({"choices": [{"message": message}]})).unwrap(),
-        )
+    fn processor(message: &serde_json::Value) -> Result<ResponseProcessor> {
+        Ok(ResponseProcessor::new(serde_json::from_value(
+            json!({"choices": [{"message": message}]}),
+        )?))
     }
 
     #[tokio::test]
-    async fn prints_normal_message_without_tool_calls() {
+    async fn prints_normal_message_without_tool_calls() -> Result<()> {
         let mut output = Vec::new();
         assert_eq!(
-            processor(json!({"content": "Hello"}))
+            processor(&json!({"content": "Hello"}))?
                 .process_to(&mut Vec::new(), &mut output)
-                .await
-                .unwrap(),
+                .await?,
             TurnOutcome::Finished
         );
         assert_eq!(output, b"Hello\n");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn reads_multiple_files_with_or_without_text_content() {
+    async fn reads_multiple_files_with_or_without_text_content() -> Result<()> {
         let file_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/response.rs");
         let call = json!({
             "id": "read_1",
@@ -139,49 +140,52 @@ mod tests {
                 content: "Read the file".into(),
             }];
             let mut second_call = call.clone();
-            second_call["id"] = json!("read_2");
+            *second_call.get_mut("id").context("Missing call ID")? = json!("read_2");
             assert_eq!(
                 processor(
-                    json!({"content": content, "tool_calls": [call.clone(), second_call.clone()]})
-                )
+                    &json!({"content": content, "tool_calls": [call.clone(), second_call.clone()]})
+                )?
                 .process_to(&mut messages, &mut output)
-                .await
-                .unwrap(),
+                .await?,
                 TurnOutcome::Continue
             );
             assert!(output.is_empty());
-            let history = serde_json::to_value(&messages).unwrap();
+            let history = serde_json::to_value(&messages)?;
             assert_eq!(
-                history[0],
-                json!({"role": "user", "content": "Read the file"})
+                history.get(0),
+                Some(&json!({"role": "user", "content": "Read the file"}))
             );
             assert_eq!(
-                history[1],
-                json!({"role": "assistant", "content": content, "tool_calls": [call, second_call]})
+                history.get(1),
+                Some(
+                    &json!({"role": "assistant", "content": content, "tool_calls": [call, second_call]})
+                )
             );
             for (index, id) in [(2, "read_1"), (3, "read_2")] {
                 assert_eq!(
-                    history[index],
-                    json!({"role": "tool", "tool_call_id": id, "content": include_str!("response.rs")})
+                    history.get(index),
+                    Some(
+                        &json!({"role": "tool", "tool_call_id": id, "content": include_str!("response.rs")})
+                    )
                 );
             }
             assert_eq!(
-                processor(json!({"content": "Done"}))
+                processor(&json!({"content": "Done"}))?
                     .process_to(&mut messages, &mut output)
-                    .await
-                    .unwrap(),
+                    .await?,
                 TurnOutcome::Finished
             );
             assert_eq!(output, b"Done\n");
             assert_eq!(
-                serde_json::to_value(&messages).unwrap()[4],
-                json!({"role": "assistant", "content": "Done"})
+                serde_json::to_value(&messages)?.get(4),
+                Some(&json!({"role": "assistant", "content": "Done"}))
             );
         }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn returns_tool_errors_to_the_model() {
+    async fn returns_tool_errors_to_the_model() -> Result<()> {
         for (name, arguments) in [
             ("Read", None),
             ("Read", Some("{}")),
@@ -193,28 +197,32 @@ mod tests {
                 Some(r#"{"file_path":"/nonexistent-agent-test-file"}"#),
             ),
         ] {
-            let response = processor(json!({"tool_calls": [{
+            let response = processor(&json!({"tool_calls": [{
                 "id": "call_1", "type": "function",
                 "function": {"name": name, "arguments": arguments}
-            }]}));
+            }]}))?;
             let mut messages = Vec::new();
             assert_eq!(
-                response
-                    .process_to(&mut messages, &mut Vec::new())
-                    .await
-                    .unwrap(),
+                response.process_to(&mut messages, &mut Vec::new()).await?,
                 TurnOutcome::Continue
             );
             let Message::Tool {
                 content,
                 tool_call_id,
-            } = &messages[1]
+            } = messages.get(1).context("Missing tool result")?
             else {
-                panic!("Expected a tool result");
+                bail!("Expected a tool result");
             };
             assert_eq!(tool_call_id, "call_1");
-            let error: serde_json::Value = serde_json::from_str(content).unwrap();
-            assert!(!error["error"].as_str().unwrap().is_empty());
+            let error: serde_json::Value = serde_json::from_str(content)?;
+            assert!(
+                !error
+                    .get("error")
+                    .and_then(serde_json::Value::as_str)
+                    .context("Missing error text")?
+                    .is_empty()
+            );
         }
+        Ok(())
     }
 }
