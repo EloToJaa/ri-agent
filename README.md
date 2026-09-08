@@ -9,9 +9,9 @@ With Nix, launch the packaged TUI directly (no development shell needed):
 ```sh
 export OPENROUTER_API_KEY='your-api-key'
 nix run
-nix run -- --resume                 # Resume this directory's latest session
-nix run -- --no-save                # Try the TUI without saving history
-nix run -- --help
+nix run . -- --resume                 # Resume this directory's latest session
+nix run . -- --no-save                # Try the TUI without saving history
+nix run . -- --help
 ```
 
 The first run builds the application and its vendored Lua/SQLite dependencies. Bash is included in the packaged runtime; other commands invoked by the agent use your existing `PATH`. Use F2 for models, F3 for reasoning, and F4 for saved sessions.
@@ -26,7 +26,7 @@ cargo run -p ri-agent-cli -- -p "Explain crates/agent/src/agent.rs"  # One-shot 
 cargo run -p ri-agent-cli -- --tui -p "Inspect this project"
 ```
 
-The executable retains its original name, `codecrafters-claude-code`. Without Nix, install Rust 1.96+, a C compiler (for vendored Lua), and Bash. The Nix shell sets `MODEL=minimax/minimax-m3:free`; unset it to use the model from Lua, or override it with `--model`.
+The executable is named `ri`. Without Nix, install Rust 1.96+, a C compiler (for vendored Lua), and Bash. The Nix shell sets `MODEL=minimax/minimax-m3:free`; unset it to use the model from Lua, or override it with `--model`.
 
 ### Interactive interface
 
@@ -136,4 +136,4 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Tests cover local tools, Lua validation/hooks/tools, TUI state/rendering, and mock-HTTP agent sessions. They need no live credentials and do not verify live-provider compatibility. `nix build` packages `result/bin/codecrafters-claude-code`; run `nix fmt` after editing Nix files.
+Tests cover local tools, Lua validation/hooks/tools, TUI state/rendering, and mock-HTTP agent sessions. They need no live credentials and do not verify live-provider compatibility. `nix build` packages `result/bin/ri`; run `nix fmt` after editing Nix files.

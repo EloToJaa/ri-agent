@@ -59,7 +59,7 @@ fn server(responses: Vec<Value>) -> (std::net::SocketAddr, thread::JoinHandle<Ve
 
 fn run(responses: Vec<Value>, max_turns: usize) -> (Output, Vec<Value>) {
     let (address, server) = server(responses);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_codecrafters-claude-code"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ri"))
         .args([
             "-p",
             "Read a file",

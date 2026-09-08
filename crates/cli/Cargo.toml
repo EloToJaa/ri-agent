@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [[bin]]
-name = "codecrafters-claude-code"
+name = "ri"
 path = "src/main.rs"
 
 [lints]

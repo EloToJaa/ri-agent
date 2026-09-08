@@ -42,14 +42,14 @@
           ];
           buildInputs = [ pkgs.openssl ];
           postInstall = ''
-            wrapProgram "$out/bin/codecrafters-claude-code" \
+            wrapProgram "$out/bin/ri" \
               --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.bash ]}
           '';
         };
 
         apps.default = {
           type = "app";
-          program = "${self.packages.${system}.default}/bin/codecrafters-claude-code";
+          program = "${self.packages.${system}.default}/bin/ri";
           meta.description = "OpenRouter agent harness with a Ratatui interface";
         };
 

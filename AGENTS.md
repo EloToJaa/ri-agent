@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This repository implements an asynchronous Rust agent harness using an OpenRouter-compatible API. The workspace contains `ri-agent` (main library), `ri-agent-lua`, `ri-agent-tui`, and `ri-agent-cli`. The executable retains the name `codecrafters-claude-code`.
+This repository implements an asynchronous Rust agent harness using an OpenRouter-compatible API. The workspace contains `ri-agent` (main library), `ri-agent-lua`, `ri-agent-tui`, and `ri-agent-cli`. The executable is named `ri`.
 
 - `crates/cli/src/main.rs` defines CLI arguments, configuration precedence, and frontend selection.
 - `crates/tui/src/lib.rs` owns Ratatui rendering and terminal input.
