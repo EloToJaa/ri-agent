@@ -1,4 +1,4 @@
--- Copy to ~/.config/ri-agent/config.lua, or pass --config examples/config.lua.
+-- Copy to ~/.ri/config.lua, or pass --config examples/config.lua.
 -- This file is executable, trusted Lua 5.4. Never load config from untrusted sources.
 return {
     settings = {

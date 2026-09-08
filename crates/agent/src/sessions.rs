@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::{
-    env, fs,
+    fs,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -36,12 +36,7 @@ pub struct SessionSummary {
 
 impl SessionStore {
     pub fn default_path() -> Result<PathBuf> {
-        let base = env::var_os("XDG_DATA_HOME")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-            .context("Set XDG_DATA_HOME or HOME, or pass --session-db / --no-save")?;
-        Ok(base.join("ri-agent/sessions.sqlite3"))
+        Ok(crate::config::harness_directory()?.join("sessions.sqlite3"))
     }
 
     pub fn open(path: PathBuf, cwd: &Path) -> Result<Self> {

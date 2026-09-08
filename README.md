@@ -46,7 +46,7 @@ The visible transcript retains up to 4,000 lines; model conversation history rem
 
 ## SQLite sessions
 
-Sessions autosave to `$XDG_DATA_HOME/ri-agent/sessions.sqlite3` (default `~/.local/share/ri-agent/sessions.sqlite3`). Session lists are scoped to the canonical current working directory. SQLite stores prompts, assistant messages, tool results, reasoning metadata, and the selected model/effort; API client credentials and Lua code are not serialized. On Unix, new directories use mode `0700` and the database uses `0600`. Stored conversation/tool contents can themselves contain secrets; the database is **not encrypted**.
+All default harness files live under `~/.ri`: Lua configuration in `~/.ri/config.lua` and SQLite sessions in `~/.ri/sessions.sqlite3`. The directory is created automatically when saving is enabled. Session lists are scoped to the canonical current working directory. SQLite stores prompts, assistant messages, tool results, reasoning metadata, and the selected model/effort; API client credentials and Lua code are not serialized. On Unix, new directories use mode `0700` and the database uses `0600`. Stored conversation/tool contents can themselves contain secrets; the database is **not encrypted**.
 
 ```sh
 cargo run -p ri-agent-cli -- --sessions           # List this directory's sessions; no API key needed
@@ -61,13 +61,13 @@ Resume restores the saved model and reasoning choice rather than configuration d
 
 ## Lua configuration
 
-The harness loads `$XDG_CONFIG_HOME/ri-agent/config.lua`, or `~/.config/ri-agent/config.lua` when XDG_CONFIG_HOME is unset. A missing default file is fine. `--config PATH` loads an explicit file and reports missing-file or Lua errors. Project-local configuration is **never loaded automatically**.
+The harness loads `~/.ri/config.lua` using `HOME`. XDG configuration/data paths are not used. A missing default file is fine. `--config PATH` loads an explicit file and reports missing-file or Lua errors. Project-local configuration is **never loaded automatically**.
 
 Start with [examples/config.lua](examples/config.lua):
 
 ```sh
-mkdir -p ~/.config/ri-agent
-cp examples/config.lua ~/.config/ri-agent/config.lua
+mkdir -p ~/.ri
+cp examples/config.lua ~/.ri/config.lua
 cargo run -p ri-agent-cli -- --config examples/config.lua
 ```
 

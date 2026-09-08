@@ -7,6 +7,16 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::HashSet, env, path::PathBuf, sync::Arc};
 
+/// Default directory for harness configuration and persistent state.
+pub fn harness_directory() -> Result<PathBuf> {
+    let home = env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .context(
+            "HOME is not set; supply explicit --config and --session-db paths (or --no-save)",
+        )?;
+    Ok(PathBuf::from(home).join(".ri"))
+}
+
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
@@ -27,15 +37,9 @@ pub struct LuaConfig {
 impl LuaConfig {
     pub fn load(path: Option<PathBuf>) -> Result<Arc<Self>> {
         let explicit = path.is_some();
-        let path = path.or_else(|| {
-            env::var_os("XDG_CONFIG_HOME")
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-                .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-                .map(|base| base.join("ri-agent/config.lua"))
-        });
-        let Some(path) = path else {
-            return Self::from_source("return {}", "default");
+        let path = match path {
+            Some(path) => path,
+            None => harness_directory()?.join("config.lua"),
         };
         let source = match std::fs::read_to_string(&path) {
             Ok(source) => source,
@@ -101,9 +105,9 @@ impl LuaConfig {
     }
 
     pub fn has_tool(&self, name: &str) -> bool {
-        self.definitions
-            .iter()
-            .any(|definition| definition["function"]["name"] == name)
+        self.definitions.iter().any(|definition| {
+            definition.pointer("/function/name").and_then(Value::as_str) == Some(name)
+        })
     }
 
     pub async fn hook(self: &Arc<Self>, name: &'static str, text: String) -> Result<String> {
@@ -148,7 +152,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn loads_settings_hooks_and_custom_tools() {
+    async fn loads_settings_hooks_and_custom_tools() -> Result<()> {
         let config = LuaConfig::from_source(
             r"return {
             settings = { model = 'mock', max_turns = 3 },
@@ -158,31 +162,29 @@ mod tests {
                 execute = function(args) return args.text end }}
         }",
             "test",
-        )
-        .unwrap();
+        )?;
         assert_eq!(config.settings.model.as_deref(), Some("mock"));
         assert_eq!(
-            config.hook("before_prompt", "hello".into()).await.unwrap(),
+            config.hook("before_prompt", "hello".into()).await?,
             "prefix: hello"
         );
         assert_eq!(
-            config.hook("after_response", "hello".into()).await.unwrap(),
+            config.hook("after_response", "hello".into()).await?,
             "hello"
         );
         assert_eq!(
             config
                 .execute("Echo".into(), r#"{"text":"hi"}"#.into())
-                .await
-                .unwrap(),
+                .await?,
             "hi"
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn example_configuration_loads_and_callback_errors_are_reported() {
+    async fn example_configuration_loads_and_callback_errors_are_reported() -> Result<()> {
         let config =
-            LuaConfig::from_source(include_str!("../../../examples/config.lua"), "example")
-                .unwrap();
+            LuaConfig::from_source(include_str!("../../../examples/config.lua"), "example")?;
         assert!(config.has_tool("Echo"));
         assert!(config.execute("Echo".into(), "{}".into()).await.is_err());
         assert!(
@@ -194,13 +196,14 @@ mod tests {
         let config = LuaConfig::from_source(
             "return {hooks={before_prompt=function() error('hook failed') end}}",
             "test",
-        )
-        .unwrap();
+        )?;
         let error = config
             .hook("before_prompt", "hello".into())
             .await
-            .unwrap_err();
+            .err()
+            .context("Expected a hook error")?;
         assert!(format!("{error:#}").contains("hook failed"));
+        Ok(())
     }
 
     #[test]

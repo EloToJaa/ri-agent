@@ -25,7 +25,7 @@ struct Args {
     prompt: Option<String>,
     #[arg(long)]
     tui: bool,
-    /// Trusted Lua configuration; defaults to $XDG_CONFIG_HOME/ri-agent/config.lua.
+    /// Trusted Lua configuration; defaults to ~/.ri/config.lua.
     #[arg(long)]
     config: Option<PathBuf>,
     #[arg(long, env = "MODEL")]
@@ -59,11 +59,15 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let store = if args.no_save { None } else { Some(SessionStore::open(
-        args.session_db
-            .map_or_else(SessionStore::default_path, Ok)?,
-        &env::current_dir()?,
-    )?) };
+    let store = if args.no_save {
+        None
+    } else {
+        Some(SessionStore::open(
+            args.session_db
+                .map_or_else(SessionStore::default_path, Ok)?,
+            &env::current_dir()?,
+        )?)
+    };
     if args.sessions {
         for saved in store
             .as_ref()
@@ -105,7 +109,7 @@ async fn main() -> Result<()> {
             max_output_bytes: args
                 .max_output_bytes
                 .or(settings.max_output_bytes)
-                .unwrap_or(limits::Limits::default().max_output_bytes),
+                .unwrap_or_else(|| limits::Limits::default().max_output_bytes),
         },
         lua,
     };
@@ -113,22 +117,7 @@ async fn main() -> Result<()> {
     if let Some(store) = store {
         session = session.with_store(store);
     }
-    let mut interrupted = false;
-    if let Some(id) = args.resume {
-        let id = match id.as_str() {
-            "latest" => session
-                .store()
-                .context("Session persistence is disabled")?
-                .list()
-                .await?
-                .first()
-                .context("No saved sessions in this directory")?
-                .id
-                .clone(),
-            _ => id,
-        };
-        interrupted = session.resume(&id).await?;
-    }
+    let interrupted = resume(&mut session, args.resume).await?;
     if args.tui || args.prompt.is_none() {
         return ri_agent_tui::run(base_url, session, args.prompt, interrupted).await;
     }
@@ -155,6 +144,23 @@ async fn main() -> Result<()> {
         eprintln!("Session: {}", session.id());
     }
     session.submit(args.prompt.context("Missing prompt")?).await
+}
+
+async fn resume(session: &mut Session, id: Option<String>) -> Result<bool> {
+    let Some(id) = id else { return Ok(false) };
+    if id != "latest" {
+        return session.resume(&id).await;
+    }
+    let id = session
+        .store()
+        .context("Session persistence is disabled")?
+        .list()
+        .await?
+        .first()
+        .context("No saved sessions in this directory")?
+        .id
+        .clone();
+    session.resume(&id).await
 }
 
 #[cfg(test)]
