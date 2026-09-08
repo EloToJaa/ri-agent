@@ -1,3 +1,6 @@
+mod reasoning;
+pub use reasoning::ReasoningEffort;
+
 use anyhow::{Context, Result, bail};
 use mlua::{Function, Lua, LuaSerdeExt, Table};
 use serde::Deserialize;
@@ -8,6 +11,7 @@ use std::{collections::HashSet, env, path::PathBuf, sync::Arc};
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     pub model: Option<String>,
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub base_url: Option<String>,
     pub max_turns: Option<std::num::NonZeroUsize>,
     pub command_timeout: Option<std::num::NonZeroU64>,

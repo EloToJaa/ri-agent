@@ -60,7 +60,13 @@ fn server(responses: Vec<Value>) -> (std::net::SocketAddr, thread::JoinHandle<Ve
 fn run(responses: Vec<Value>, max_turns: usize) -> (Output, Vec<Value>) {
     let (address, server) = server(responses);
     let mut child = Command::new(env!("CARGO_BIN_EXE_codecrafters-claude-code"))
-        .args(["-p", "Read a file", "--max-turns", &max_turns.to_string()])
+        .args([
+            "-p",
+            "Read a file",
+            "--no-save",
+            "--max-turns",
+            &max_turns.to_string(),
+        ])
         .env("MODEL", "mock-model")
         .env("XDG_CONFIG_HOME", "/nonexistent-ri-agent-test-config")
         .env("OPENROUTER_API_KEY", "mock-key")
@@ -131,12 +137,14 @@ fn completes_a_tool_round_trip_and_recovers_from_errors() {
 }
 
 #[tokio::test]
-async fn session_retains_history_runs_lua_tools_and_recovers_after_failed_turns() {
+async fn session_retains_history_runs_lua_tools_and_recovers_after_failed_turns()
+-> anyhow::Result<()> {
     use ri_agent::{
         agent::{AgentConfig, Session},
-        config::LuaConfig,
+        config::{LuaConfig, ReasoningEffort},
         events::{Event, Output},
         limits::Limits,
+        sessions::SessionStore,
     };
     let lua = LuaConfig::from_source(
         r#"return {
@@ -152,7 +160,7 @@ async fn session_retains_history_runs_lua_tools_and_recovers_after_failed_turns(
     )
     .unwrap();
     let (address, server) = server(vec![
-        json!({"choices":[{"message":{"tool_calls":[{
+        json!({"choices":[{"message":{"reasoning":"thinking", "reasoning_details":[{"type":"reasoning.encrypted","data":"opaque","signature":"keep-exactly"}], "tool_calls":[{
             "id":"echo_1", "type":"function", "function":{
                 "name":"Echo", "arguments":"{\"text\":\"hello\"}"
             }
@@ -168,13 +176,28 @@ async fn session_retains_history_runs_lua_tools_and_recovers_after_failed_turns(
         "mock-key".into(),
         AgentConfig {
             model: "mock-model".into(),
+            reasoning_effort: Some(ReasoningEffort::High),
             max_turns: std::num::NonZeroUsize::new(3).unwrap(),
             limits: Limits::default(),
             lua,
         },
         Output::channel(sender),
     );
-    session.submit("first".into()).await.unwrap();
+    let directory = std::env::temp_dir().join(format!("ri-agent-resume-{}", session.id()));
+    let store = SessionStore::open(
+        directory.join("sessions.sqlite3"),
+        &std::env::current_dir()?,
+    )?;
+    session = session.with_store(store.clone());
+    let id = session.id().to_owned();
+    session.submit("first".into()).await?;
+    session.clear();
+    assert!(!session.resume(&id).await?);
+    assert_eq!(
+        session.selection().reasoning_effort,
+        Some(ReasoningEffort::High)
+    );
+    assert_eq!(session.history().len(), 3);
     assert!(session.submit("failed".into()).await.is_err());
     session.submit("second".into()).await.unwrap();
     session.clear();
@@ -182,6 +205,16 @@ async fn session_retains_history_runs_lua_tools_and_recovers_after_failed_turns(
     let requests = server.join().unwrap();
     assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 4);
     assert_eq!(requests[0]["messages"][0]["content"], "task: first");
+    assert_eq!(requests[0]["reasoning"]["effort"], "high");
+    assert_eq!(requests[1]["messages"][1]["reasoning"], "thinking");
+    assert_eq!(
+        requests[1]["messages"][1]["reasoning_details"][0]["signature"],
+        "keep-exactly"
+    );
+    assert_eq!(
+        requests[2]["messages"][1]["reasoning_details"],
+        requests[1]["messages"][1]["reasoning_details"]
+    );
     assert_eq!(requests[1]["messages"][2]["content"], "hello");
     assert_eq!(requests[3]["messages"].as_array().unwrap().len(), 5);
     assert_eq!(requests[3]["messages"][3]["content"], "Done!");
@@ -198,6 +231,9 @@ async fn session_retains_history_runs_lua_tools_and_recovers_after_failed_turns(
     }
     assert_eq!(assistant, ["Done!", "Follow up!", "New chat!"]);
     assert!(tools[0].contains("hello"));
+    assert_eq!(store.list().await?.len(), 2);
+    std::fs::remove_dir_all(directory)?;
+    Ok(())
 }
 
 #[test]

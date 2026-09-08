@@ -2,6 +2,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug)]
 pub enum Event {
+    User(String),
     Progress(String),
     Assistant(String),
     Tool(String),
@@ -23,7 +24,7 @@ impl Output {
         match event {
             Event::Progress(text) => eprintln!("{text}"),
             Event::Assistant(text) => println!("{text}"),
-            Event::Tool(_) => {}
+            Event::Tool(_) | Event::User(_) => {}
         }
     }
 }

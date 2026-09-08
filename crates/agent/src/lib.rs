@@ -1,6 +1,8 @@
 pub mod agent;
 pub mod events;
 pub mod limits;
+pub mod openrouter;
+pub mod sessions;
 pub use ri_agent_lua as config;
 mod message;
 mod response;

@@ -10,6 +10,9 @@ workspace = true
 [dependencies]
 ri-agent-lua = { path = "../lua" }
 anyhow = "1"
+rusqlite = { version = "0.38", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 futures-util = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "process", "io-util", "io-std", "time", "sync"] }
 async-openai = { version = "=0.32.4", features = ["byot", "chat-completion"] }

@@ -13,6 +13,10 @@ pub(crate) struct Choice {
 #[derive(Debug, Deserialize)]
 pub(crate) struct Message {
     pub(crate) content: Option<String>,
+    #[serde(default, alias = "reasoning_content")]
+    pub(crate) reasoning: Option<String>,
+    #[serde(default)]
+    pub(crate) reasoning_details: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     pub(crate) tool_calls: Vec<ToolCall>,
 }

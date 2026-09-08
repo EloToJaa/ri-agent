@@ -64,6 +64,8 @@ impl ResponseProcessor {
         messages.push(Message::Assistant {
             content: content.clone(),
             tool_calls: choice.message.tool_calls.clone(),
+            reasoning: choice.message.reasoning.clone(),
+            reasoning_details: choice.message.reasoning_details.clone(),
         });
 
         if choice.message.tool_calls.is_empty() {

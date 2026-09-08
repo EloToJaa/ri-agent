@@ -3,6 +3,8 @@
 return {
     settings = {
         model = "anthropic/claude-haiku-4.5",
+        -- reasoning_effort = "high", -- Optional; must be advertised by the selected model.
+        -- Omit reasoning_effort to preserve provider defaults.
         base_url = "https://openrouter.ai/api/v1",
         max_turns = 20,
         command_timeout = 60, -- Built-in Bash only, in seconds.

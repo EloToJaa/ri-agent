@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::num::NonZeroUsize;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-pub const MAX_TURNS: NonZeroUsize = NonZeroUsize::new(20).unwrap();
+pub const MAX_TURNS: NonZeroUsize = NonZeroUsize::MIN.saturating_add(19);
 
 #[derive(Clone, Copy)]
 pub struct Limits {
@@ -14,7 +14,7 @@ impl Default for Limits {
     fn default() -> Self {
         Self {
             command_timeout: std::time::Duration::from_secs(60),
-            max_output_bytes: NonZeroUsize::new(32 * 1024).unwrap(),
+            max_output_bytes: NonZeroUsize::MIN.saturating_add(32 * 1024 - 1),
         }
     }
 }
