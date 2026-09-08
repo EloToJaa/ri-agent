@@ -36,8 +36,21 @@
               "-p"
               "ri-agent-cli"
             ];
-          nativeBuildInputs = [ pkgs.pkg-config ];
+          nativeBuildInputs = [
+            pkgs.pkg-config
+            pkgs.makeWrapper
+          ];
           buildInputs = [ pkgs.openssl ];
+          postInstall = ''
+            wrapProgram "$out/bin/codecrafters-claude-code" \
+              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.bash ]}
+          '';
+        };
+
+        apps.default = {
+          type = "app";
+          program = "${self.packages.${system}.default}/bin/codecrafters-claude-code";
+          meta.description = "OpenRouter agent harness with a Ratatui interface";
         };
 
         devShells.default = pkgs.mkShell {

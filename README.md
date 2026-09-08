@@ -4,6 +4,20 @@ An asynchronous Rust agent harness with a Ratatui terminal interface, a one-shot
 
 ## Getting started
 
+With Nix, launch the packaged TUI directly (no development shell needed):
+
+```sh
+export OPENROUTER_API_KEY='your-api-key'
+nix run
+nix run -- --resume                 # Resume this directory's latest session
+nix run -- --no-save                # Try the TUI without saving history
+nix run -- --help
+```
+
+The first run builds the application and its vendored Lua/SQLite dependencies. Bash is included in the packaged runtime; other commands invoked by the agent use your existing `PATH`. Use F2 for models, F3 for reasoning, and F4 for saved sessions.
+
+For development:
+
 ```sh
 nix develop
 export OPENROUTER_API_KEY='your-api-key'
