@@ -1,4 +1,4 @@
-//! OpenRouter catalog and capability metadata. No other providers are supported.
+//! `OpenRouter` catalog and capability metadata. No other providers are supported.
 pub use crate::config::ReasoningEffort;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer};
@@ -27,7 +27,7 @@ pub struct ReasoningCapabilities {
     pub supported_efforts: SupportedEfforts,
 }
 
-/// OpenRouter distinguishes omitted effort metadata from explicit null (all efforts).
+/// `OpenRouter` distinguishes omitted effort metadata from explicit null (all efforts).
 #[derive(Debug, Clone, Default)]
 pub enum SupportedEfforts {
     #[default]

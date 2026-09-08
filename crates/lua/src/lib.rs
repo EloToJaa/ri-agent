@@ -52,7 +52,7 @@ impl LuaConfig {
     pub fn from_source(source: &str, name: &str) -> Result<Arc<Self>> {
         let lua = Lua::new();
         let root: Table = lua.load(source).set_name(name).eval()?;
-        for pair in root.clone().pairs::<String, mlua::Value>() {
+        for pair in root.pairs::<String, mlua::Value>() {
             let (key, _) = pair?;
             if !["settings", "hooks", "tools"].contains(&key.as_str()) {
                 bail!("Unknown configuration key: {key}");
@@ -150,13 +150,13 @@ mod tests {
     #[tokio::test]
     async fn loads_settings_hooks_and_custom_tools() {
         let config = LuaConfig::from_source(
-            r#"return {
+            r"return {
             settings = { model = 'mock', max_turns = 3 },
             hooks = { before_prompt = function(s) return 'prefix: ' .. s end },
             tools = {{ name = 'Echo', description = 'Echo input',
                 parameters = { type = 'object' },
                 execute = function(args) return args.text end }}
-        }"#,
+        }",
             "test",
         )
         .unwrap();

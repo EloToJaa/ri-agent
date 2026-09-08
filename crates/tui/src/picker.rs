@@ -8,18 +8,18 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Kind {
+pub enum Kind {
     Model,
     Reasoning,
     Session,
 }
 
-pub(crate) struct Item {
+pub struct Item {
     pub label: String,
     pub value: String,
 }
 
-pub(crate) struct Picker {
+pub struct Picker {
     pub kind: Kind,
     items: Vec<Item>,
     query: String,
@@ -65,7 +65,7 @@ impl Picker {
                 self.selected = self
                     .selected
                     .saturating_add(1)
-                    .min(self.filtered().len().saturating_sub(1))
+                    .min(self.filtered().len().saturating_sub(1));
             }
             KeyCode::Enter => {
                 return self

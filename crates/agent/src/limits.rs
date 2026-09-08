@@ -13,7 +13,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            command_timeout: std::time::Duration::from_secs(60),
+            command_timeout: std::time::Duration::from_mins(1),
             max_output_bytes: NonZeroUsize::MIN.saturating_add(32 * 1024 - 1),
         }
     }

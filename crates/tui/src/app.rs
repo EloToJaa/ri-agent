@@ -23,7 +23,7 @@ use unicode_width::UnicodeWidthStr;
 
 const MAX_LINES: usize = 4000;
 
-pub(crate) struct App {
+pub struct App {
     selection: Selection,
     id: String,
     pub input: String,
@@ -275,7 +275,7 @@ impl App {
             KeyCode::F(2) if !self.busy => self.open_picker(Kind::Model),
             KeyCode::F(3) if !self.busy => self.open_picker(Kind::Reasoning),
             KeyCode::F(4) if !self.busy && self.persistence => {
-                self.send(commands, Command::ListSessions)?
+                self.send(commands, Command::ListSessions)?;
             }
             KeyCode::Enter => self.submit(commands)?,
             KeyCode::Backspace => {

@@ -77,7 +77,7 @@ impl Session {
     pub fn set_output(&mut self, output: Output) {
         self.output = output;
     }
-    pub fn store(&self) -> Option<&SessionStore> {
+    pub const fn store(&self) -> Option<&SessionStore> {
         self.store.as_ref()
     }
     pub fn id(&self) -> &str {

@@ -147,7 +147,7 @@ async fn session_retains_history_runs_lua_tools_and_recovers_after_failed_turns(
         sessions::SessionStore,
     };
     let lua = LuaConfig::from_source(
-        r#"return {
+        r"return {
         hooks = {
             before_prompt = function(text) return 'task: ' .. text end,
             after_response = function(text) return text .. '!' end,
@@ -155,7 +155,7 @@ async fn session_retains_history_runs_lua_tools_and_recovers_after_failed_turns(
         tools = {{ name = 'Echo', description = 'Echo',
             parameters = {type = 'object'},
             execute = function(args) return args.text end }},
-    }"#,
+    }",
         "test",
     )
     .unwrap();

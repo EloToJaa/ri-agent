@@ -12,7 +12,7 @@ pub enum Event {
 pub struct Output(Option<UnboundedSender<Event>>);
 
 impl Output {
-    pub fn channel(sender: UnboundedSender<Event>) -> Self {
+    pub const fn channel(sender: UnboundedSender<Event>) -> Self {
         Self(Some(sender))
     }
 

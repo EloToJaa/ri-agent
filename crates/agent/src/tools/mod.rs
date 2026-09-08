@@ -9,9 +9,9 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::{future::Future, pin::Pin};
 
-pub(crate) type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
+pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
 
-pub(crate) trait Tool: Sync {
+pub trait Tool: Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
     fn parameters(&self) -> Value;
@@ -23,18 +23,18 @@ static TOOLS: &[&dyn Tool] = &[&read::Read, &write::Write, &bash::Bash];
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum ToolDefinition {
+pub enum ToolDefinition {
     Function { function: FunctionDefinition },
 }
 
 #[derive(Serialize)]
-pub(crate) struct FunctionDefinition {
+pub struct FunctionDefinition {
     name: &'static str,
     description: &'static str,
     parameters: Value,
 }
 
-pub(crate) async fn execute_batch(
+pub async fn execute_batch(
     calls: &[ToolCall],
     limits: Limits,
     output: &crate::events::Output,
@@ -81,7 +81,7 @@ where
     results
 }
 
-pub(crate) fn definitions() -> Vec<ToolDefinition> {
+pub fn definitions() -> Vec<ToolDefinition> {
     TOOLS
         .iter()
         .map(|tool| ToolDefinition::Function {
@@ -95,7 +95,7 @@ pub(crate) fn definitions() -> Vec<ToolDefinition> {
 }
 
 #[cfg(test)]
-pub(crate) async fn execute(call: &ToolCall, limits: Limits) -> Result<String> {
+pub async fn execute(call: &ToolCall, limits: Limits) -> Result<String> {
     execute_with(call, limits, &crate::events::Output::default(), None).await
 }
 

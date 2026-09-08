@@ -3,12 +3,12 @@ use anyhow::{Result, bail};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TurnOutcome {
+pub enum TurnOutcome {
     Continue,
     Finished,
 }
 
-pub(crate) struct ResponseProcessor {
+pub struct ResponseProcessor {
     response: Response,
     limits: crate::limits::Limits,
     output: crate::events::Output,
@@ -16,7 +16,7 @@ pub(crate) struct ResponseProcessor {
 }
 
 impl ResponseProcessor {
-    pub(crate) fn with_limits(mut self, limits: crate::limits::Limits) -> Self {
+    pub(crate) const fn with_limits(mut self, limits: crate::limits::Limits) -> Self {
         self.limits = limits;
         self
     }

@@ -1,4 +1,4 @@
-//! Working-directory-scoped SQLite persistence. API credentials are never serialized.
+//! Working-directory-scoped `SQLite` persistence. API credentials are never serialized.
 use crate::{agent::Selection, message::Message};
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, params};

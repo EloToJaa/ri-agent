@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "role")]
-pub(crate) enum Message {
+pub enum Message {
     #[serde(rename = "user")]
     User { content: String },
     #[serde(rename = "assistant")]

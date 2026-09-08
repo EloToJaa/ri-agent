@@ -33,7 +33,7 @@ struct Args {
     /// Reasoning effort: none, minimal, low, medium, high, xhigh, or max.
     #[arg(long)]
     reasoning: Option<ReasoningEffort>,
-    /// Override the OpenRouter endpoint (also useful for local mock servers).
+    /// Override the `OpenRouter` endpoint (also useful for local mock servers).
     #[arg(long, env = "OPENROUTER_BASE_URL")]
     base_url: Option<String>,
     #[arg(long)]
@@ -48,7 +48,7 @@ struct Args {
     /// List saved sessions for the current working directory and exit.
     #[arg(long, conflicts_with_all = ["no_save", "resume", "prompt", "tui"])]
     sessions: bool,
-    /// Override the SQLite session database path.
+    /// Override the `SQLite` session database path.
     #[arg(long, conflicts_with = "no_save")]
     session_db: Option<PathBuf>,
     /// Do not save conversation or tool results to disk.
@@ -59,14 +59,11 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let store = match args.no_save {
-        true => None,
-        false => Some(SessionStore::open(
-            args.session_db
-                .map_or_else(SessionStore::default_path, Ok)?,
-            &env::current_dir()?,
-        )?),
-    };
+    let store = if args.no_save { None } else { Some(SessionStore::open(
+        args.session_db
+            .map_or_else(SessionStore::default_path, Ok)?,
+        &env::current_dir()?,
+    )?) };
     if args.sessions {
         for saved in store
             .as_ref()
@@ -103,8 +100,7 @@ async fn main() -> Result<()> {
             command_timeout: std::time::Duration::from_secs(
                 args.command_timeout
                     .or(settings.command_timeout)
-                    .map(NonZeroU64::get)
-                    .unwrap_or(60),
+                    .map_or(60, NonZeroU64::get),
             ),
             max_output_bytes: args
                 .max_output_bytes
