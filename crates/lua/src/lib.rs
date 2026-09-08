@@ -174,6 +174,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn example_configuration_loads_and_callback_errors_are_reported() {
+        let config =
+            LuaConfig::from_source(include_str!("../../../examples/config.lua"), "example")
+                .unwrap();
+        assert!(config.has_tool("Echo"));
+        assert!(config.execute("Echo".into(), "{}".into()).await.is_err());
+        assert!(
+            config
+                .execute("Echo".into(), "invalid json".into())
+                .await
+                .is_err()
+        );
+        let config = LuaConfig::from_source(
+            "return {hooks={before_prompt=function() error('hook failed') end}}",
+            "test",
+        )
+        .unwrap();
+        let error = config
+            .hook("before_prompt", "hello".into())
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("hook failed"));
+    }
+
     #[test]
     fn rejects_invalid_configuration() {
         for source in [

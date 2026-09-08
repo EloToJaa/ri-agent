@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, bail};
-use crossterm::event::{Event as TerminalEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, Event as TerminalEvent, EventStream, KeyCode,
+    KeyEventKind, KeyModifiers,
+};
 use futures_util::StreamExt;
 use ratatui::{
     DefaultTerminal, Frame,
@@ -191,6 +194,7 @@ impl App {
 struct RestoreTerminal;
 impl Drop for RestoreTerminal {
     fn drop(&mut self) {
+        let _ = crossterm::execute!(io::stdout(), DisableBracketedPaste);
         ratatui::restore();
     }
 }
@@ -212,6 +216,7 @@ pub async fn run(
     // Ratatui's panic hook restores the terminal; the guard also covers ordinary errors.
     let _restore = RestoreTerminal;
     let mut terminal = ratatui::try_init()?;
+    crossterm::execute!(io::stdout(), EnableBracketedPaste)?;
     let worker = async move {
         while let Some(command) = requests.recv().await {
             match command {
