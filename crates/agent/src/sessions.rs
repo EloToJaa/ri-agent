@@ -18,12 +18,16 @@ pub struct SessionStore {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SavedSession {
     pub id: String,
+    #[serde(default = "legacy_provider")]
+    pub provider: String,
     pub selection: Selection,
     pub interrupted: bool,
     pub(crate) messages: Vec<Message>,
     pub(crate) stable_len: usize,
     pub(crate) revision: i64,
 }
+
+fn legacy_provider() -> String { "openrouter".into() }
 
 #[derive(Debug, Clone)]
 pub struct SessionSummary {
@@ -173,6 +177,7 @@ mod tests {
         let store = SessionStore::open(path.clone(), &directory)?;
         let saved = SavedSession {
             id: "test".into(),
+            provider: "openrouter".into(),
             selection: Selection {
                 model: "mock".into(),
                 reasoning_effort: None,

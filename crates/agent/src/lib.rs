@@ -1,4 +1,6 @@
 pub mod agent;
+pub mod credentials;
+pub mod provider;
 pub mod events;
 pub mod limits;
 pub mod openrouter;

@@ -1,5 +1,5 @@
-use crate::{message::Message, response::Response, tools};
-use anyhow::{Result, bail};
+use crate::{message::Message, provider::Completion, tools};
+use anyhow::Result;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9,7 +9,7 @@ pub enum TurnOutcome {
 }
 
 pub struct ResponseProcessor {
-    response: Response,
+    response: Completion,
     limits: crate::limits::Limits,
     output: crate::events::Output,
     lua: Option<std::sync::Arc<crate::config::LuaConfig>>,
@@ -31,7 +31,7 @@ impl ResponseProcessor {
         self
     }
 
-    pub(crate) fn new(response: Response) -> Self {
+    pub(crate) fn new(response: Completion) -> Self {
         Self {
             response,
             limits: crate::limits::Limits::default(),
@@ -49,13 +49,9 @@ impl ResponseProcessor {
         messages: &mut Vec<Message>,
         output: &mut (impl AsyncWrite + Unpin),
     ) -> Result<TurnOutcome> {
-        let Some(choice) = self.response.choices.first() else {
-            bail!("Response contains no choices");
-        };
-
-        let content = match (&self.lua, &choice.message.content) {
+        let content = match (&self.lua, &self.response.content) {
             (Some(lua), Some(content)) => Some(lua.hook("after_response", content.clone()).await?),
-            _ => choice.message.content.clone(),
+            _ => self.response.content.clone(),
         };
         if let Some(text) = &content {
             self.output
@@ -63,12 +59,12 @@ impl ResponseProcessor {
         }
         messages.push(Message::Assistant {
             content: content.clone(),
-            tool_calls: choice.message.tool_calls.clone(),
-            reasoning: choice.message.reasoning.clone(),
-            reasoning_details: choice.message.reasoning_details.clone(),
+            tool_calls: self.response.tool_calls.clone(),
+            reasoning: self.response.reasoning.clone(),
+            reasoning_details: self.response.reasoning_details.clone(),
         });
 
-        if choice.message.tool_calls.is_empty() {
+        if self.response.tool_calls.is_empty() {
             if let Some(content) = &content {
                 output.write_all(format!("{content}\n").as_bytes()).await?;
             }
@@ -76,13 +72,13 @@ impl ResponseProcessor {
         }
 
         let results = tools::execute_batch(
-            &choice.message.tool_calls,
+            &self.response.tool_calls,
             self.limits,
             &self.output,
             self.lua.as_ref(),
         )
         .await;
-        for (call, contents) in choice.message.tool_calls.iter().zip(results) {
+        for (call, contents) in self.response.tool_calls.iter().zip(results) {
             self.output.emit(crate::events::Event::Tool(format!(
                 "{} ({}):\n{}",
                 call.function.name, call.id, contents
@@ -100,12 +96,12 @@ impl ResponseProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Context;
+    use anyhow::{Context, bail};
     use serde_json::json;
 
     fn processor(message: &serde_json::Value) -> Result<ResponseProcessor> {
         Ok(ResponseProcessor::new(serde_json::from_value(
-            json!({"choices": [{"message": message}]}),
+            message.clone(),
         )?))
     }
 

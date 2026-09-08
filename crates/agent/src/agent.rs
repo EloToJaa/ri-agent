@@ -3,13 +3,12 @@ use crate::{
     events::{Event, Output},
     limits::Limits,
     message::Message,
-    response::Response,
+    provider::{CompletionRequest, Provider},
     response_processor::{ResponseProcessor, TurnOutcome},
     sessions::{SavedSession, SessionStore},
     tools,
 };
 use anyhow::{Context, Result, bail};
-use async_openai::{Client, config::OpenAIConfig};
 use serde::{Deserialize, Serialize};
 use std::{num::NonZeroUsize, sync::Arc};
 
@@ -27,23 +26,9 @@ pub struct AgentConfig {
     pub lua: Arc<LuaConfig>,
 }
 
-#[derive(Serialize)]
-struct Reasoning {
-    effort: ReasoningEffort,
-}
-
-#[derive(Serialize)]
-struct ChatRequest<'a> {
-    messages: &'a [Message],
-    model: &'a str,
-    tools: &'a [serde_json::Value],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning: Option<Reasoning>,
-}
-
 /// A conversation shared by the CLI and TUI frontends.
 pub struct Session {
-    client: Client<OpenAIConfig>,
+    provider: Arc<dyn Provider>,
     config: AgentConfig,
     messages: Vec<Message>,
     output: Output,
@@ -53,14 +38,9 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(base_url: String, api_key: String, config: AgentConfig, output: Output) -> Self {
-        let client = Client::with_config(
-            OpenAIConfig::new()
-                .with_api_base(base_url)
-                .with_api_key(api_key),
-        );
+    pub fn new(provider: Arc<dyn Provider>, config: AgentConfig, output: Output) -> Self {
         Self {
-            client,
+            provider,
             config,
             messages: Vec::new(),
             output,
@@ -68,6 +48,10 @@ impl Session {
             store: None,
             revision: 0,
         }
+    }
+
+    pub fn provider(&self) -> Arc<dyn Provider> {
+        Arc::clone(&self.provider)
     }
 
     #[must_use]
@@ -132,6 +116,9 @@ impl Session {
             .as_ref()
             .context("Session persistence is disabled")?;
         let mut saved = store.load(id.to_owned()).await?;
+        if saved.provider != self.provider.id() {
+            bail!("Session belongs to provider '{}', not '{}'", saved.provider, self.provider.id());
+        }
         if saved.interrupted {
             saved.messages.truncate(saved.stable_len);
         }
@@ -168,6 +155,7 @@ impl Session {
         self.revision = store
             .save(SavedSession {
                 id: self.id.clone(),
+                provider: self.provider.id().to_owned(),
                 selection: self.selection(),
                 interrupted,
                 messages: self.messages.clone(),
@@ -205,20 +193,12 @@ impl Session {
                 turn + 1,
                 self.config.max_turns
             )));
-            let response: Response = self
-                .client
-                .chat()
-                .create_byot(ChatRequest {
-                    messages: &self.messages,
-                    model: &self.config.model,
-                    tools: &definitions,
-                    reasoning: self
-                        .config
-                        .reasoning_effort
-                        .map(|effort| Reasoning { effort }),
-                })
-                .await
-                .context("Failed to request OpenRouter model response")?;
+            let response = self.provider.complete(CompletionRequest {
+                messages: &self.messages,
+                model: &self.config.model,
+                tools: &definitions,
+                reasoning_effort: self.config.reasoning_effort,
+            }).await.with_context(|| format!("Failed to request {} model response", self.provider.name()))?;
             let outcome = ResponseProcessor::new(response)
                 .with_limits(self.config.limits)
                 .with_runtime(self.output.clone(), Arc::clone(&self.config.lua))
