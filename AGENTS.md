@@ -7,10 +7,10 @@ This repository implements an asynchronous Rust agent harness using an OpenRoute
 - `crates/cli/src/main.rs` defines CLI arguments, configuration precedence, and frontend selection.
 - `crates/tui/src/lib.rs` owns Ratatui rendering and terminal input.
 - `crates/lua/src/lib.rs` loads trusted user configuration and runs hooks/custom tools.
-- `src/lib.rs` exposes sessions, events, limits, and Lua configuration.
-- `src/agent.rs` manages the conversation loop; `message.rs`, `response.rs`, and `response_processor.rs` define and process protocol data.
-- `src/tools/` contains the `Tool` trait, shared registry, and Read, Write, and Bash implementations. Register new tools in `TOOLS` so definitions and execution stay aligned.
-- `src/limits.rs` centralizes execution limits.
+- `crates/agent/src/lib.rs` exposes sessions, events, limits, and Lua configuration.
+- `crates/agent/src/agent.rs` manages the conversation loop; `message.rs`, `response.rs`, and `response_processor.rs` define and process protocol data.
+- `crates/agent/src/tools/` contains the `Tool` trait, shared registry, and Read, Write, and Bash implementations. Register new tools in `TOOLS` so definitions and execution stay aligned.
+- `crates/agent/src/limits.rs` centralizes execution limits.
 - Unit tests live alongside implementation code; `crates/cli/tests/agent_loop.rs` exercises the binary against a local mock HTTP server.
 - `flake.nix` supplies the development shell, package build, and Nix formatter.
 

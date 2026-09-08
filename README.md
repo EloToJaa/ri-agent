@@ -8,7 +8,7 @@ An asynchronous Rust agent harness with a Ratatui terminal interface, a one-shot
 nix develop
 export OPENROUTER_API_KEY='your-api-key'
 cargo run -p ri-agent-cli                     # Interactive TUI
-cargo run -p ri-agent-cli -- -p "Explain src/agent.rs"  # One-shot CLI
+cargo run -p ri-agent-cli -- -p "Explain crates/agent/src/agent.rs"  # One-shot CLI
 cargo run -p ri-agent-cli -- --tui -p "Inspect this project"
 ```
 
@@ -77,7 +77,7 @@ Consecutive Read calls run concurrently (up to four). Mutating and Lua tools run
 ## Workspace
 
 ```text
-src/           ri-agent       Main library: sessions, protocol, events, built-in tools
+crates/agent/  ri-agent       Main library: sessions, protocol, events, built-in tools
 crates/lua/    ri-agent-lua   Lua settings, hooks, custom-tool runtime
 crates/tui/    ri-agent-tui   Ratatui interface using the main library
 crates/cli/    ri-agent-cli   CLI configuration and interface selection

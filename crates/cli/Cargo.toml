@@ -12,7 +12,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-ri-agent = { path = "../.." }
+ri-agent = { path = "../agent" }
 ri-agent-tui = { path = "../tui" }
 anyhow = "1"
 clap = { version = "4.3.14", features = ["derive", "env"] }

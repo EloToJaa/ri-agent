@@ -26,6 +26,8 @@
       in
       {
         packages.default = naerskLib.buildPackage {
+          pname = "ri-agent";
+          version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
           src = pkgs.lib.cleanSource ./.;
           cargoBuildOptions =
             options:
