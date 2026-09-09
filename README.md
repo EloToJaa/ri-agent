@@ -9,6 +9,7 @@ With Nix, launch the packaged TUI directly (no development shell needed):
 ```sh
 nix run . -- login                 # Browser PKCE login; saves ~/.ri/credentials.json
 # or: nix run . -- login --api-key   # Hidden prompt for an existing OpenRouter key
+# or: nix run . -- login --manual    # Paste the browser callback URL into the terminal
 nix run
 nix run . -- --resume                 # Resume this directory's latest session
 nix run . -- --no-save                # Try the TUI without saving history
@@ -29,7 +30,7 @@ cargo run -p ri-agent-cli -- -p "Explain crates/agent/src/agent.rs"  # One-shot 
 cargo run -p ri-agent-cli -- --tui -p "Inspect this project"
 ```
 
-The executable is named `ri`. `ri login` authenticates with OpenRouter using a browser-based PKCE flow and a localhost callback. On headless systems, use `ri login --api-key` to paste a key without displaying it. Without Nix, install Rust 1.96+, a C compiler (for vendored Lua), and Bash. The Nix shell sets `MODEL=minimax/minimax-m3:free`; unset it to use the model from Lua, or override it with `--model`.
+The executable is named `ri`. `ri login` authenticates with OpenRouter using a browser-based PKCE flow and a localhost callback. On headless or restricted systems, use `ri login --api-key` to paste a key without displaying it, or `ri login --manual` to open the browser and paste the complete redirected callback URL back into the terminal. Manual mode still uses S256 PKCE; the URL contains only a short-lived, single-use authorization code. Without Nix, install Rust 1.96+, a C compiler (for vendored Lua), and Bash. The Nix shell sets `MODEL=minimax/minimax-m3:free`; unset it to use the model from Lua, or override it with `--model`.
 
 ### Interactive interface
 

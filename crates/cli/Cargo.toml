@@ -20,6 +20,7 @@ rand = "0.9"
 rpassword = "7"
 sha2 = "0.10"
 urlencoding = "2"
+url = "2"
 clap = { version = "4.3.14", features = ["derive", "env"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 

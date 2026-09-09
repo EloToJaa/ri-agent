@@ -11,12 +11,15 @@ use std::{
     net::{TcpListener, TcpStream},
 };
 
-pub async fn run(api_key_mode: bool) -> Result<()> {
+pub async fn run(api_key_mode: bool, manual_mode: bool) -> Result<()> {
+    if api_key_mode && manual_mode {
+        bail!("--api-key and --manual cannot be used together");
+    }
     let key = if api_key_mode {
         let value = rpassword::prompt_password("OpenRouter API key: ")?;
         credentials::api_key(value)?
     } else {
-        browser_login().await?
+        browser_login(manual_mode).await?
     };
     let path = credentials::default_path()?;
     credentials::save(&path, &key)?;
@@ -24,7 +27,7 @@ pub async fn run(api_key_mode: bool) -> Result<()> {
     Ok(())
 }
 
-async fn browser_login() -> Result<credentials::ApiKey> {
+async fn browser_login(manual_mode: bool) -> Result<credentials::ApiKey> {
     let mut verifier_bytes = [0_u8; 32];
     rand::rng().fill_bytes(&mut verifier_bytes);
     let verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
@@ -49,10 +52,20 @@ async fn browser_login() -> Result<credentials::ApiKey> {
     let callback_listener = listener
         .try_clone()
         .context("Cloning OpenRouter login callback")?;
-    let (mut stream, _) = tokio::task::spawn_blocking(move || accept_callback(&callback_listener))
-        .await
-        .context("Login callback task failed")??;
-    let code = read_code(&mut stream)?;
+    let code = if manual_mode {
+        println!("Paste the full redirected URL here, then press Enter:");
+        let mut url = String::new();
+        std::io::stdin()
+            .read_line(&mut url)
+            .context("Reading pasted callback URL")?;
+        code_from_callback_url(url.trim())?
+    } else {
+        let (mut stream, _) =
+            tokio::task::spawn_blocking(move || accept_callback(&callback_listener))
+                .await
+                .context("Login callback task failed")??;
+        read_code(&mut stream)?
+    };
     let client = OpenRouter::new(
         openrouter::DEFAULT_BASE_URL,
         credentials::api_key("login-exchange-placeholder")?,
@@ -95,6 +108,23 @@ fn open_browser(url: &str) -> bool {
         })
         .spawn()
         .is_ok()
+}
+
+fn code_from_callback_url(url: &str) -> Result<String> {
+    let parsed = url::Url::parse(url).context("Pasted value is not a valid callback URL")?;
+    let mut code = None;
+    let mut error = None;
+    for (key, value) in parsed.query_pairs() {
+        match key.as_ref() {
+            "code" => code = Some(value.into_owned()),
+            "error" => error = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+    if let Some(error) = error {
+        bail!("OpenRouter login failed: {error}");
+    }
+    code.context("Pasted callback URL does not contain an authorization code")
 }
 
 fn read_code(stream: &mut TcpStream) -> Result<String> {
@@ -142,6 +172,11 @@ mod tests {
 
     #[test]
     fn parses_success_and_rejection_callbacks_without_leaking_codes() -> Result<()> {
+        assert_eq!(
+            code_from_callback_url("http://localhost/callback?code=one-time-secret")?,
+            "one-time-secret"
+        );
+        assert!(code_from_callback_url("http://localhost/callback?error=denied").is_err());
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let address = listener.local_addr()?;
         let join = std::thread::spawn(move || {

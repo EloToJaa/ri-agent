@@ -69,14 +69,17 @@ enum Command {
         /// Paste an existing key instead of opening a browser.
         #[arg(long)]
         api_key: bool,
+        /// Paste the browser's redirected callback URL instead of using localhost callback delivery.
+        #[arg(long)]
+        manual: bool,
     },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    if let Some(Command::Login { api_key }) = args.command {
-        return login::run(api_key).await;
+    if let Some(Command::Login { api_key, manual }) = args.command {
+        return login::run(api_key, manual).await;
     }
     let store = if args.no_save {
         None
