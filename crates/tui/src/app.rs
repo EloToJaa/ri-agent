@@ -143,6 +143,10 @@ impl App {
         self.busy = false;
         self.status = "Ready".into();
         match result {
+            Ok(Outcome::LoginRequested) => {
+                self.busy = true;
+                self.status = "Logging in…".into();
+            }
             Ok(Outcome::ProviderChanged {
                 id,
                 selection,
@@ -1078,6 +1082,31 @@ mod tests {
         app.input = "/provider invalid".into();
         app.enter(&sender)?;
         assert!(receiver.try_recv().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn login_results_preserve_conversation_selection_and_draft() -> Result<()> {
+        let mut app = app()?;
+        app.input = "Next task".into();
+        app.append("YOU", "Previous prompt", Color::Cyan);
+        let id = app.id.clone();
+        let selection = app.selection.clone();
+        app.finish(Ok(Outcome::LoginRequested));
+        assert!(app.busy);
+        app.finish(Err("Login cancelled".into()));
+        assert!(!app.busy);
+        assert_eq!(app.input, "Next task");
+        assert_eq!(app.id, id);
+        assert_eq!(app.selection, selection);
+        assert!(
+            app.lines
+                .iter()
+                .any(|line| line.to_string().contains("Previous prompt"))
+        );
+        app.finish(Ok(Outcome::Notice("Login saved".into())));
+        assert!(!app.busy);
+        assert_eq!(app.input, "Next task");
         Ok(())
     }
 

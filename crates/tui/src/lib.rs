@@ -1,5 +1,6 @@
 mod app;
 mod commands;
+mod login;
 mod picker;
 
 use anyhow::{Context, Result, bail};
@@ -29,6 +30,7 @@ pub(crate) enum Command {
 }
 
 enum Outcome {
+    LoginRequested,
     ProviderChanged {
         id: String,
         selection: Selection,
@@ -82,26 +84,8 @@ async fn execute(command: Command, session: &mut Session, base_url: &str) -> Res
                     .await?,
             ));
         }
-        Command::Login => {
-            let status = std::process::Command::new(
-                std::env::current_exe().context("Finding ri executable")?,
-            )
-            .arg("login")
-            .arg("--provider")
-            .arg(session.provider().id())
-            .stdin(std::process::Stdio::inherit())
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status()
-            .context("Running ri login")?;
-            if !status.success() {
-                bail!("ri login exited with {status}");
-            }
-            return Ok(Outcome::Notice(format!(
-                "{} login saved. Restart ri to use the new credential.",
-                session.provider().name()
-            )));
-        }
+        // Only the frontend can safely hand ownership of its terminal to login.
+        Command::Login => return Ok(Outcome::LoginRequested),
         Command::Clear => {
             session.clear();
             return Ok(Outcome::Loaded {
@@ -196,7 +180,20 @@ pub async fn run_with_base_url(
                 }
                 result = completed.recv() => {
                     while let Ok(event) = events.try_recv() { app.event(event); }
-                    let result = result.context("Agent worker stopped")?;
+                    let result = match result.context("Agent worker stopped")? {
+                        Ok(Outcome::LoginRequested) => {
+                            app.finish(Ok(Outcome::LoginRequested));
+                            // Stop the event reader before the child inherits stdin. No TUI
+                            // input or drawing happens until the terminal has been restored.
+                            drop(input);
+                            let result = login::run(&mut terminal, provider.id()).await?;
+                            input = EventStream::new();
+                            result.map(|()| Outcome::Notice(format!(
+                                "{} login saved. Restart ri to use the new credential.", provider.name()
+                            ))).map_err(|error| format!("{error:#}"))
+                        }
+                        result => result,
+                    };
                     if let Ok(Outcome::ProviderChanged { provider: selected, .. }) = &result {
                         provider = selected.clone();
                         refresh.send(provider.clone()).context("Catalog worker stopped")?;
