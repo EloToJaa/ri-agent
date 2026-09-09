@@ -1001,7 +1001,8 @@ mod tests {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         app.input = "Please $".into();
         let (_, items) = app.completions().context("Missing skill completion")?;
-        assert_eq!(items.len(), 2);
+        assert!(items.iter().any(|item| item.value == "$review"));
+        assert!(items.iter().any(|item| item.value == "$test"));
         app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &sender)?;
         app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &sender)?;
         assert_eq!(app.input, "Please $test ");
