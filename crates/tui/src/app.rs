@@ -36,6 +36,8 @@ type FileSearch = std::pin::Pin<Box<dyn std::future::Future<Output = Result<File
 
 pub struct App {
     selection: Selection,
+    provider_id: String,
+    provider_name: String,
     id: String,
     pub input: String,
     lines: VecDeque<Line<'static>>,
@@ -54,10 +56,12 @@ impl App {
     pub fn new(session: &Session, interrupted: bool) -> Self {
         let mut app = Self {
             selection: session.selection(),
+            provider_id: session.provider().id().into(),
+            provider_name: session.provider().name().into(),
             id: session.id().to_owned(),
             input: String::new(),
             lines: VecDeque::new(),
-            status: "Loading OpenRouter catalog…".into(),
+            status: "Loading provider catalog…".into(),
             busy: false,
             scroll_back: 0,
             models: Vec::new(),
@@ -118,6 +122,22 @@ impl App {
         self.busy = false;
         self.status = "Ready".into();
         match result {
+            Ok(Outcome::ProviderChanged {
+                id,
+                selection,
+                provider,
+            }) => {
+                self.id = id;
+                self.selection = selection;
+                self.provider_id = provider.id().into();
+                self.provider_name = provider.name().into();
+                self.models.clear();
+                self.catalog_loading = true;
+                self.lines.clear();
+                self.scroll_back = 0;
+                self.status = "Loading provider catalog…".into();
+                self.append("PROVIDER", &format!("Switched to {}. Started a new conversation; previous saved sessions remain available.", self.provider_name), Color::Cyan);
+            }
             Ok(Outcome::Updated { id, selection }) => {
                 self.id = id;
                 self.selection = selection;
@@ -217,7 +237,8 @@ impl App {
         commands: &mpsc::UnboundedSender<Command>,
     ) -> Result<()> {
         match commands::parse(input)? {
-            SlashCommand::Model(Some(query)) => {
+            SlashCommand::Provider(Some(id)) => self.send(commands, Command::Provider(id))?,
+            SlashCommand::Provider(None) => self.open_picker(Kind::Provider),            SlashCommand::Model(Some(query)) => {
                 let model = self
                     .models
                     .iter()
@@ -226,7 +247,7 @@ impl App {
                 let Some(model) = model else {
                     self.append(
                         "MODEL",
-                        "No matching OpenRouter model; use /model to search.",
+                        "No matching provider model; use /model to search.",
                         Color::Yellow,
                     );
                     return Ok(());
@@ -269,7 +290,7 @@ impl App {
             SlashCommand::Login => self.send(commands, Command::Login)?,
             SlashCommand::Help => self.append(
                 "COMMANDS",
-                "/model [query] · /reasoning [effort] · /resume [id] · /login · /help",
+                "/provider [openrouter|openai-codex] (new conversation) · /model [query] · /reasoning [effort] · /resume [id] · /login · /help",
                 Color::Cyan,
             ),
         }
@@ -321,6 +342,19 @@ impl App {
                         .map_or_else(|| "default".into(), |effort| effort.to_string()),
                 )
             }
+            Kind::Provider => (
+                vec![
+                    Item {
+                        label: "OpenRouter".into(),
+                        value: "openrouter".into(),
+                    },
+                    Item {
+                        label: "OpenAI Codex".into(),
+                        value: "openai-codex".into(),
+                    },
+                ],
+                self.provider_id.clone(),
+            ),
             Kind::Session | Kind::File => return,
         };
         self.picker = Some(Picker::new(kind, items, &current));
@@ -396,6 +430,7 @@ impl App {
                         },
                     }),
                     Kind::Session => Command::Resume(value),
+                    Kind::Provider => Command::Provider(value),
                     Kind::File => {
                         self.file_search = None;
                         // JSON quoting preserves spaces and control characters in paths.
@@ -610,7 +645,8 @@ impl App {
                 Span::styled(state, Style::default().fg(state_color).bold()),
                 Span::styled(
                     format!(
-                        "  OpenRouter  ·  {persistence}  ·  session {}",
+                        "  {}  ·  {persistence}  ·  session {}",
+                        self.provider_name,
                         short_id(&self.id)
                     ),
                     Style::default().fg(MUTED),
@@ -831,6 +867,31 @@ mod tests {
                 .iter()
                 .any(|line| line.to_string().contains("fd unavailable"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn provider_command_opens_picker_and_blocks_busy_changes() -> Result<()> {
+        let mut app = app()?;
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        app.input = "/provider".into();
+        app.enter(&sender)?;
+        assert!(
+            app.picker
+                .as_ref()
+                .is_some_and(|picker| picker.kind == Kind::Provider)
+        );
+        app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &sender)?;
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &sender)?;
+        assert!(matches!(receiver.try_recv()?, Command::Provider(id) if id == "openai-codex"));
+        app.input = "/provider openrouter".into();
+        app.enter(&sender)?;
+        assert!(receiver.try_recv().is_err());
+        app.finish(Err("Missing credentials".into()));
+        assert_eq!(app.provider_id, "openrouter");
+        app.input = "/provider invalid".into();
+        app.enter(&sender)?;
+        assert!(receiver.try_recv().is_err());
         Ok(())
     }
 

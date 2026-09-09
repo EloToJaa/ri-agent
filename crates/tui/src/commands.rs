@@ -5,13 +5,21 @@ use std::str::FromStr;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlashCommand {
     Model(Option<String>),
+    Provider(Option<String>),
     Reasoning(Option<ReasoningEffort>),
     Resume(Option<String>),
     Login,
     Help,
 }
 
-const COMMANDS: [&str; 5] = ["/model", "/reasoning", "/resume", "/login", "/help"];
+const COMMANDS: [&str; 6] = [
+    "/model",
+    "/reasoning",
+    "/resume",
+    "/login",
+    "/help",
+    "/provider",
+];
 
 pub fn suggestions(input: &str) -> Vec<&'static str> {
     let prefix = input.split_whitespace().next().unwrap_or_default();
@@ -37,6 +45,12 @@ pub fn parse(input: &str) -> Result<SlashCommand> {
     }
     match command {
         "/model" => Ok(SlashCommand::Model(argument)),
+        "/provider" => {
+            if let Some(id) = &argument {
+                ri_agent::provider::default_model(id)?;
+            }
+            Ok(SlashCommand::Provider(argument))
+        }
         "/reasoning" => Ok(SlashCommand::Reasoning(
             argument
                 .map(|value| ReasoningEffort::from_str(&value))
@@ -57,7 +71,14 @@ mod tests {
     fn completes_commands_as_the_slash_prefix_is_typed() {
         assert_eq!(
             suggestions("/"),
-            vec!["/model", "/reasoning", "/resume", "/login", "/help"]
+            vec![
+                "/model",
+                "/reasoning",
+                "/resume",
+                "/login",
+                "/help",
+                "/provider"
+            ]
         );
         assert_eq!(suggestions("/rea"), vec!["/reasoning"]);
         assert_eq!(complete("/mod", 0).as_deref(), Some("/model "));
@@ -67,6 +88,13 @@ mod tests {
 
     #[test]
     fn parses_commands_and_rejects_ambiguous_input() -> Result<()> {
+        assert_eq!(parse("/provider")?, SlashCommand::Provider(None));
+        assert_eq!(
+            parse("/provider openai-codex")?,
+            SlashCommand::Provider(Some("openai-codex".into()))
+        );
+        assert!(parse("/provider invalid").is_err());
+        assert_eq!(complete("/pro", 0).as_deref(), Some("/provider "));
         assert_eq!(parse("/model")?, SlashCommand::Model(None));
         assert_eq!(
             parse("/model qwen")?,

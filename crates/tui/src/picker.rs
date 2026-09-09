@@ -10,6 +10,7 @@ use unicode_segmentation::UnicodeSegmentation;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Model,
+    Provider,
     Reasoning,
     Session,
     File,
@@ -114,7 +115,8 @@ impl Picker {
         .areas(center);
         frame.render_widget(Clear, center);
         let title = match self.kind {
-            Kind::Model => " MODEL · OpenRouter tool-capable catalog ",
+            Kind::Model => " MODEL · active provider catalog ",
+            Kind::Provider => " PROVIDER · switching starts a new conversation ",
             Kind::Reasoning => " REASONING · available for selected model ",
             Kind::Session => " SESSION · current working directory ",
             Kind::File => " FILE · fd · current working directory ",

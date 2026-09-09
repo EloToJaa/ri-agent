@@ -2,9 +2,38 @@
 pub use crate::config::ReasoningEffort;
 pub use crate::message::Message as ChatMessage;
 pub use crate::response::{Message as Completion, ToolCall, ToolCallFunction};
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer};
 use std::{future::Future, pin::Pin};
+
+/// Connect using environment/saved credentials, preserving the configured `OpenRouter` endpoint.
+pub fn connect(id: &str, openrouter_base_url: &str) -> Result<std::sync::Arc<dyn Provider>> {
+    use crate::{codex::Codex, credentials, openrouter::OpenRouter};
+    match id {
+        "openrouter" => Ok(std::sync::Arc::new(OpenRouter::new(
+            openrouter_base_url,
+            credentials::resolve(openrouter_base_url)?,
+        )?)),
+        "openai-codex" => {
+            let auth = credentials::load_codex(&credentials::default_path()?)?.context(
+                "No OpenAI Codex credentials found. Run 'ri login --provider openai-codex'",
+            )?;
+            Ok(std::sync::Arc::new(Codex::new(
+                crate::codex::DEFAULT_BASE_URL,
+                auth,
+            )?))
+        }
+        value => bail!("Unknown provider '{value}'; expected openrouter or openai-codex"),
+    }
+}
+
+pub fn default_model(id: &str) -> Result<&'static str> {
+    match id {
+        "openrouter" => Ok("anthropic/claude-haiku-4.5"),
+        "openai-codex" => Ok("gpt-5.1-codex"),
+        value => bail!("Unknown provider '{value}'; expected openrouter or openai-codex"),
+    }
+}
 
 pub type ProviderFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 

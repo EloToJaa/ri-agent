@@ -2,12 +2,9 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use ri_agent::{
     agent::{AgentConfig, Session},
-    codex::Codex,
     config::{LuaConfig, ReasoningEffort},
-    credentials,
     events::Output,
     limits, openrouter,
-    openrouter::OpenRouter,
     sessions::SessionStore,
 };
 mod login;
@@ -129,19 +126,7 @@ async fn main() -> Result<()> {
         .base_url
         .or_else(|| settings.base_url.clone())
         .unwrap_or_else(|| openrouter::DEFAULT_BASE_URL.into());
-    let provider: std::sync::Arc<dyn ri_agent::provider::Provider> = match args.provider.as_str() {
-        "openrouter" => std::sync::Arc::new(OpenRouter::new(
-            &base_url,
-            credentials::resolve(&base_url)?,
-        )?),
-        "openai-codex" => {
-            let auth = credentials::load_codex(&credentials::default_path()?)?.context(
-                "No OpenAI Codex credentials found. Run 'ri login --provider openai-codex'",
-            )?;
-            std::sync::Arc::new(Codex::new(ri_agent::codex::DEFAULT_BASE_URL, auth)?)
-        }
-        value => bail!("Unknown provider '{value}'; expected openrouter or openai-codex"),
-    };
+    let provider = ri_agent::provider::connect(&args.provider, &base_url)?;
     let config = AgentConfig {
         model: args
             .model
@@ -177,7 +162,7 @@ async fn main() -> Result<()> {
     }
     let interrupted = resume(&mut session, args.resume).await?;
     if args.tui || args.prompt.is_none() {
-        return ri_agent_tui::run(session, args.prompt, interrupted).await;
+        return ri_agent_tui::run_with_base_url(session, args.prompt, interrupted, &base_url).await;
     }
     if interrupted {
         eprintln!(

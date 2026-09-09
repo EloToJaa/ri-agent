@@ -12,6 +12,7 @@ use futures_util::StreamExt;
 use ri_agent::{
     agent::{Selection, Session},
     events::{Event, Output},
+    provider::{self, Provider},
     sessions::SessionSummary,
 };
 use std::io::{self, IsTerminal};
@@ -20,6 +21,7 @@ use tokio::sync::mpsc;
 pub(crate) enum Command {
     Submit(String),
     Select(Selection),
+    Provider(String),
     Resume(String),
     ListSessions,
     Clear,
@@ -27,6 +29,11 @@ pub(crate) enum Command {
 }
 
 enum Outcome {
+    ProviderChanged {
+        id: String,
+        selection: Selection,
+        provider: std::sync::Arc<dyn Provider>,
+    },
     Updated {
         id: String,
         selection: Selection,
@@ -41,10 +48,23 @@ enum Outcome {
     Notice(String),
 }
 
-async fn execute(command: Command, session: &mut Session) -> Result<Outcome> {
+async fn execute(command: Command, session: &mut Session, base_url: &str) -> Result<Outcome> {
     match command {
         Command::Submit(prompt) => session.submit(prompt).await?,
         Command::Select(selection) => session.select(selection).await?,
+        Command::Provider(id) => {
+            if id != session.provider().id() {
+                let provider = provider::connect(&id, base_url)?;
+                session
+                    .switch_provider(provider, provider::default_model(&id)?.into())
+                    .await?;
+                return Ok(Outcome::ProviderChanged {
+                    id: session.id().to_owned(),
+                    selection: session.selection(),
+                    provider: session.provider(),
+                });
+            }
+        }
         Command::Resume(id) => {
             let interrupted = session.resume(&id).await?;
             return Ok(Outcome::Loaded {
@@ -107,33 +127,48 @@ impl Drop for RestoreTerminal {
     }
 }
 
-pub async fn run(mut session: Session, prompt: Option<String>, interrupted: bool) -> Result<()> {
+pub async fn run(session: Session, prompt: Option<String>, interrupted: bool) -> Result<()> {
+    run_with_base_url(
+        session,
+        prompt,
+        interrupted,
+        ri_agent::openrouter::DEFAULT_BASE_URL,
+    )
+    .await
+}
+
+pub async fn run_with_base_url(
+    mut session: Session,
+    prompt: Option<String>,
+    interrupted: bool,
+    base_url: &str,
+) -> Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         bail!("The TUI requires a terminal; use -p <prompt> for noninteractive runs");
     }
     let mut app = App::new(&session, interrupted);
-    let provider = session.provider();
+    let mut provider = session.provider();
     let (events_tx, mut events) = mpsc::unbounded_channel();
     let (commands, mut requests) = mpsc::unbounded_channel();
     let (completed_tx, mut completed) = mpsc::unbounded_channel();
     session.set_output(Output::channel(events_tx));
-    let (refresh, mut refresh_requests) = mpsc::unbounded_channel();
+    let (refresh, mut refresh_requests) = mpsc::unbounded_channel::<std::sync::Arc<dyn Provider>>();
     let (catalog_tx, mut catalogs) = mpsc::unbounded_channel();
-    refresh.send(())?;
+    refresh.send(provider.clone())?;
     let catalog_worker = async move {
-        while refresh_requests.recv().await.is_some() {
+        while let Some(provider) = refresh_requests.recv().await {
             let result = provider
                 .models()
                 .await
                 .map_err(|error| format!("{error:#}"));
-            if catalog_tx.send(result).is_err() {
+            if catalog_tx.send((provider.id(), result)).is_err() {
                 break;
             }
         }
     };
     let worker = async move {
         while let Some(command) = requests.recv().await {
-            let result = execute(command, &mut session)
+            let result = execute(command, &mut session, base_url)
                 .await
                 .map_err(|error| format!("{error:#}"));
             if completed_tx.send(result).is_err() {
@@ -162,14 +197,22 @@ pub async fn run(mut session: Session, prompt: Option<String>, interrupted: bool
                 }
                 result = completed.recv() => {
                     while let Ok(event) = events.try_recv() { app.event(event); }
-                    app.finish(result.context("Agent worker stopped")?);
+                    let result = result.context("Agent worker stopped")?;
+                    if let Ok(Outcome::ProviderChanged { provider: selected, .. }) = &result {
+                        provider = selected.clone();
+                        refresh.send(provider.clone()).context("Catalog worker stopped")?;
+                    }
+                    app.finish(result);
                 }
                 catalog = catalogs.recv() => {
-                    app.catalog(catalog.context("Catalog worker stopped")?);
-                    if initial_prompt { initial_prompt = false; app.submit(&commands)?; }
+                    let (id, result) = catalog.context("Catalog worker stopped")?;
+                    if id == provider.id() {
+                        app.catalog(result);
+                        if initial_prompt { initial_prompt = false; app.submit(&commands)?; }
+                    }
                 }
                 event = input.next() => {
-                    if handle_input(event, &mut app, &commands, &refresh)? { return Ok(()); }
+                    if handle_input(event, &mut app, &commands, &refresh, &provider)? { return Ok(()); }
                 }
             }
         }
@@ -186,14 +229,17 @@ fn handle_input(
     event: Option<io::Result<TerminalEvent>>,
     app: &mut App,
     commands: &mpsc::UnboundedSender<Command>,
-    refresh: &mpsc::UnboundedSender<()>,
+    refresh: &mpsc::UnboundedSender<std::sync::Arc<dyn Provider>>,
+    provider: &std::sync::Arc<dyn Provider>,
 ) -> Result<bool> {
     let Some(event) = event else { return Ok(true) };
     match event? {
         TerminalEvent::Key(key) if key.kind != KeyEventKind::Release => {
             if key.code == KeyCode::F(5) && !app.catalog_loading {
                 app.catalog_loading = true;
-                refresh.send(()).context("Catalog worker stopped")?;
+                refresh
+                    .send(provider.clone())
+                    .context("Catalog worker stopped")?;
                 return Ok(false);
             }
             app.key(key, commands)

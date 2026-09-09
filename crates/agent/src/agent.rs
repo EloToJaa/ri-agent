@@ -103,6 +103,23 @@ impl Session {
         Ok(())
     }
 
+    /// Save the current conversation, then start a fresh provider-specific session.
+    pub async fn switch_provider(
+        &mut self,
+        provider: Arc<dyn Provider>,
+        model: String,
+    ) -> Result<()> {
+        if provider.id() == self.provider.id() {
+            return Ok(());
+        }
+        self.checkpoint(false, self.messages.len()).await?;
+        self.clear();
+        self.provider = provider;
+        self.config.model = model;
+        self.config.reasoning_effort = None;
+        Ok(())
+    }
+
     pub fn clear(&mut self) {
         self.messages.clear();
         self.id = uuid::Uuid::new_v4().to_string();
@@ -224,5 +241,94 @@ impl Session {
             self.checkpoint(true, stable_len).await?;
         }
         bail!("Maximum model turns ({}) reached", self.config.max_turns)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{Completion, Model, ProviderFuture};
+
+    struct MockProvider(&'static str);
+    impl Provider for MockProvider {
+        fn id(&self) -> &'static str {
+            self.0
+        }
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn models(&self) -> ProviderFuture<'_, Vec<Model>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+        fn complete<'a>(&'a self, _: CompletionRequest<'a>) -> ProviderFuture<'a, Completion> {
+            Box::pin(async { bail!("Unexpected completion") })
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_switch_preserves_saved_history_and_resets_selection() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("ri-provider-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root)?;
+        let store = SessionStore::open(root.join("sessions.sqlite3"), &root)?;
+        let mut session = Session::new(
+            Arc::new(MockProvider("openrouter")),
+            AgentConfig {
+                model: "old-model".into(),
+                reasoning_effort: Some(ReasoningEffort::High),
+                max_turns: NonZeroUsize::MIN,
+                limits: Limits::default(),
+                lua: LuaConfig::from_source("return {}", "test")?,
+            },
+            Output::default(),
+        )
+        .with_store(store.clone());
+        session.messages.push(Message::User {
+            content: "old prompt".into(),
+        });
+        let old_id = session.id().to_owned();
+        session
+            .switch_provider(Arc::new(MockProvider("openrouter")), "ignored".into())
+            .await?;
+        assert_eq!(session.id(), old_id);
+        assert_eq!(session.selection().model, "old-model");
+        session
+            .switch_provider(Arc::new(MockProvider("openai-codex")), "codex-model".into())
+            .await?;
+        assert_ne!(session.id(), old_id);
+        assert_eq!(session.provider().id(), "openai-codex");
+        assert!(session.history().is_empty());
+        assert_eq!(
+            session.selection(),
+            Selection {
+                model: "codex-model".into(),
+                reasoning_effort: None
+            }
+        );
+        let saved = store.load(old_id.clone()).await?;
+        assert_eq!(saved.provider, "openrouter");
+        assert_eq!(saved.messages.len(), 1);
+        assert!(session.resume(&old_id).await.is_err());
+        session
+            .switch_provider(Arc::new(MockProvider("openrouter")), "default".into())
+            .await?;
+        session.resume(&old_id).await?;
+        assert_eq!(session.history().len(), 1);
+        assert_eq!(
+            session.selection().reasoning_effort,
+            Some(ReasoningEffort::High)
+        );
+        // A concurrent writer must prevent switching rather than losing this session.
+        store.save(store.load(old_id.clone()).await?).await?;
+        assert!(
+            session
+                .switch_provider(Arc::new(MockProvider("openai-codex")), "new".into())
+                .await
+                .is_err()
+        );
+        assert_eq!(session.id(), old_id);
+        assert_eq!(session.provider().id(), "openrouter");
+        assert_eq!(session.history().len(), 1);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }
