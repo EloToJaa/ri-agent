@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use ri_agent::{
     agent::{AgentConfig, Session},
+    codex::Codex,
     config::{LuaConfig, ReasoningEffort},
     credentials,
     events::Output,
@@ -10,6 +11,7 @@ use ri_agent::{
     sessions::SessionStore,
 };
 mod login;
+mod openai_login;
 
 use std::{
     env,
@@ -36,6 +38,9 @@ struct Args {
     config: Option<PathBuf>,
     #[arg(long, env = "MODEL")]
     model: Option<String>,
+    /// Model provider: openrouter or openai-codex.
+    #[arg(long, default_value = "openrouter")]
+    provider: String,
     /// Reasoning effort: none, minimal, low, medium, high, xhigh, or max.
     #[arg(long)]
     reasoning: Option<ReasoningEffort>,
@@ -66,6 +71,9 @@ struct Args {
 enum Command {
     /// Authenticate this installation with `OpenRouter`.
     Login {
+        /// Provider to authenticate: openrouter or openai-codex.
+        #[arg(long, default_value = "openrouter")]
+        provider: String,
         /// Paste an existing key instead of opening a browser.
         #[arg(long)]
         api_key: bool,
@@ -76,10 +84,21 @@ enum Command {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    if let Some(Command::Login { api_key, manual }) = args.command {
-        return login::run(api_key, manual).await;
+    if let Some(Command::Login {
+        provider,
+        api_key,
+        manual,
+    }) = args.command
+    {
+        return match provider.as_str() {
+            "openrouter" => login::run(api_key, manual).await,
+            "openai-codex" if !api_key && !manual => Box::pin(openai_login::run()).await,
+            "openai-codex" => bail!("OpenAI Codex login does not support --api-key or --manual"),
+            _ => bail!("Unknown provider '{provider}'; expected openrouter or openai-codex"),
+        };
     }
     let store = if args.no_save {
         None
@@ -110,13 +129,30 @@ async fn main() -> Result<()> {
         .base_url
         .or_else(|| settings.base_url.clone())
         .unwrap_or_else(|| openrouter::DEFAULT_BASE_URL.into());
-    let api_key = credentials::resolve(&base_url)?;
-    let provider = std::sync::Arc::new(OpenRouter::new(&base_url, api_key)?);
+    let provider: std::sync::Arc<dyn ri_agent::provider::Provider> = match args.provider.as_str() {
+        "openrouter" => std::sync::Arc::new(OpenRouter::new(
+            &base_url,
+            credentials::resolve(&base_url)?,
+        )?),
+        "openai-codex" => {
+            let auth = credentials::load_codex(&credentials::default_path()?)?.context(
+                "No OpenAI Codex credentials found. Run 'ri login --provider openai-codex'",
+            )?;
+            std::sync::Arc::new(Codex::new(ri_agent::codex::DEFAULT_BASE_URL, auth)?)
+        }
+        value => bail!("Unknown provider '{value}'; expected openrouter or openai-codex"),
+    };
     let config = AgentConfig {
         model: args
             .model
             .or_else(|| settings.model.clone())
-            .unwrap_or_else(|| "anthropic/claude-haiku-4.5".into()),
+            .unwrap_or_else(|| {
+                if args.provider == "openai-codex" {
+                    "gpt-5.1-codex".into()
+                } else {
+                    "anthropic/claude-haiku-4.5".into()
+                }
+            }),
         reasoning_effort: args.reasoning.or(settings.reasoning_effort),
         max_turns: args
             .max_turns
@@ -141,7 +177,7 @@ async fn main() -> Result<()> {
     }
     let interrupted = resume(&mut session, args.resume).await?;
     if args.tui || args.prompt.is_none() {
-        return ri_agent_tui::run(base_url, session, args.prompt, interrupted).await;
+        return ri_agent_tui::run(session, args.prompt, interrupted).await;
     }
     if interrupted {
         eprintln!(
@@ -149,7 +185,7 @@ async fn main() -> Result<()> {
         );
     }
     if let Some(effort) = session.selection().reasoning_effort {
-        let models = openrouter::models(&base_url).await?;
+        let models = session.provider().models().await?;
         let selection = session.selection();
         let model = models
             .iter()

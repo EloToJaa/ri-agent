@@ -10,6 +10,14 @@ use std::{
 
 pub type ApiKey = SecretString;
 
+#[derive(Clone)]
+pub struct CodexCredentials {
+    pub access_token: SecretString,
+    pub refresh_token: SecretString,
+    pub id_token: SecretString,
+    pub account_id: String,
+}
+
 pub fn api_key(value: impl AsRef<str>) -> Result<ApiKey> {
     let value = value.as_ref().trim();
     if value.is_empty()
@@ -25,15 +33,26 @@ pub fn default_path() -> Result<PathBuf> {
     Ok(crate::config::harness_directory()?.join("credentials.json"))
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Credentials {
-    openrouter: StoredKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    openrouter: Option<StoredKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    openai_codex: Option<StoredCodex>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct StoredKey {
     api_key: String,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StoredCodex {
+    access_token: String,
+    refresh_token: String,
+    id_token: String,
+    account_id: String,
 }
 
 pub fn load(path: &Path) -> Result<Option<ApiKey>> {
@@ -58,7 +77,10 @@ pub fn load(path: &Path) -> Result<Option<ApiKey>> {
     let source = fs::read_to_string(path).context("Reading saved credentials")?;
     let credentials: Credentials = serde_json::from_str(&source)
         .map_err(|_| anyhow::anyhow!("Invalid credentials.json format; run 'ri login' again"))?;
-    Ok(Some(api_key(credentials.openrouter.api_key)?))
+    credentials
+        .openrouter
+        .map(|stored| api_key(stored.api_key))
+        .transpose()
 }
 
 /// Saved credentials cannot be silently redirected by a Lua endpoint override.
@@ -105,10 +127,12 @@ pub fn save(path: &Path, key: &ApiKey) -> Result<()> {
             .as_file()
             .set_permissions(fs::Permissions::from_mode(0o600))?;
     }
+    let existing = load_credentials_unchecked(path).unwrap_or_default();
     let credentials = Credentials {
-        openrouter: StoredKey {
+        openrouter: Some(StoredKey {
             api_key: key.expose_secret().to_owned(),
-        },
+        }),
+        openai_codex: existing.openai_codex,
     };
     let data = serde_json::to_vec(&credentials).context("Serializing credentials")?;
     temporary.write_all(&data)?;
@@ -117,6 +141,67 @@ pub fn save(path: &Path, key: &ApiKey) -> Result<()> {
         .persist(path)
         .map_err(|error| error.error)
         .context("Saving credentials")?;
+    Ok(())
+}
+
+fn load_credentials_unchecked(path: &Path) -> Option<Credentials> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|source| serde_json::from_str(&source).ok())
+}
+
+pub fn load_codex(path: &Path) -> Result<Option<CodexCredentials>> {
+    validate_path(path)?;
+    let Some(stored) =
+        load_credentials_unchecked(path).and_then(|credentials| credentials.openai_codex)
+    else {
+        return Ok(None);
+    };
+    if stored.account_id.trim().is_empty() {
+        bail!("Invalid OpenAI Codex credentials; run 'ri login openai-codex' again");
+    }
+    Ok(Some(CodexCredentials {
+        access_token: stored.access_token.into(),
+        refresh_token: stored.refresh_token.into(),
+        id_token: stored.id_token.into(),
+        account_id: stored.account_id,
+    }))
+}
+
+pub fn save_codex(path: &Path, value: &CodexCredentials) -> Result<()> {
+    validate_path(path)?;
+    let mut credentials = load_credentials_unchecked(path).unwrap_or_default();
+    credentials.openai_codex = Some(StoredCodex {
+        access_token: value.access_token.expose_secret().to_owned(),
+        refresh_token: value.refresh_token.expose_secret().to_owned(),
+        id_token: value.id_token.expose_secret().to_owned(),
+        account_id: value.account_id.clone(),
+    });
+    write_credentials(path, &credentials)
+}
+
+fn validate_path(path: &Path) -> Result<()> {
+    if let Ok(metadata) = fs::symlink_metadata(path)
+        && (!metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 65536)
+    {
+        bail!("Credential path must be a regular file of at most 64 KiB");
+    }
+    Ok(())
+}
+
+fn write_credentials(path: &Path, credentials: &Credentials) -> Result<()> {
+    let parent = path.parent().context("Credential path has no parent")?;
+    fs::create_dir_all(parent)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    temporary.write_all(&serde_json::to_vec(credentials)?)?;
+    temporary.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
 

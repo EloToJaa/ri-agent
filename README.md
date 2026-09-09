@@ -1,6 +1,6 @@
 # ri-agent
 
-An asynchronous Rust agent harness with a Ratatui terminal interface, a one-shot CLI, and Lua configuration/hooks/custom tools. It supports OpenRouter only and can read files, write files, and execute Bash locally.
+An asynchronous Rust agent harness with a Ratatui terminal interface, a one-shot CLI, and Lua configuration/hooks/custom tools. It supports OpenRouter and OpenAI Codex (with ChatGPT OAuth) and can read files, write files, and execute Bash locally.
 
 ## Getting started
 
@@ -10,6 +10,7 @@ With Nix, launch the packaged TUI directly (no development shell needed):
 nix run . -- login                 # Browser PKCE login; saves ~/.ri/credentials.json
 # or: nix run . -- login --api-key   # Hidden prompt for an existing OpenRouter key
 # or: nix run . -- login --manual    # Paste the browser callback URL into the terminal
+# or: nix run . -- login --provider openai-codex # ChatGPT OAuth for Codex
 nix run
 nix run . -- --resume                 # Resume this directory's latest session
 nix run . -- --no-save                # Try the TUI without saving history
@@ -30,14 +31,14 @@ cargo run -p ri-agent-cli -- -p "Explain crates/agent/src/agent.rs"  # One-shot 
 cargo run -p ri-agent-cli -- --tui -p "Inspect this project"
 ```
 
-The executable is named `ri`. `ri login` authenticates with OpenRouter using a browser-based PKCE flow and a localhost callback. On headless or restricted systems, use `ri login --api-key` to paste a key without displaying it, or `ri login --manual` to open the browser and paste the complete redirected callback URL back into the terminal. Manual mode still uses S256 PKCE; the URL contains only a short-lived, single-use authorization code. Without Nix, install Rust 1.96+, a C compiler (for vendored Lua), and Bash. The Nix shell sets `MODEL=minimax/minimax-m3:free`; unset it to use the model from Lua, or override it with `--model`.
+The executable is named `ri`. `ri login` authenticates with OpenRouter; `ri login --provider openai-codex` authenticates with ChatGPT OAuth for Codex. The default provider is OpenRouter and `--provider openai-codex` selects Codex. OpenRouter login using a browser-based PKCE flow and a localhost callback. On headless or restricted systems, use `ri login --api-key` to paste a key without displaying it, or `ri login --manual` to open the browser and paste the complete redirected callback URL back into the terminal. Manual mode still uses S256 PKCE; the URL contains only a short-lived, single-use authorization code. Without Nix, install Rust 1.96+, a C compiler (for vendored Lua), and Bash. The Nix shell sets `MODEL=minimax/minimax-m3:free`; unset it to use the model from Lua, or override it with `--model`.
 
 ### Interactive interface
 
 The TUI uses a responsive agent-workbench layout: a provider/session rail, persistent model and reasoning state, a bordered transcript, an activity-aware composer, and searchable modal selectors. It keeps conversation history across prompts and shows assistant responses, tool results, and model/tool activity. Responses appear when complete, not token-by-token.
 
 - **Ctrl+D** or **Ctrl+C**: quit.
-- **F2**: search OpenRouter’s live catalog of tool-capable models. Switching models resets the reasoning override and removes old model-specific reasoning metadata, but preserves conversation text and tool results.
+- **F2**: search the active provider’s live model catalog. Switching models resets the reasoning override and removes old model-specific reasoning metadata, but preserves conversation text and tool results.
 - **F3**: select reasoning effort or **Provider default**. Choices follow the selected model’s `reasoning.supported_efforts`; mandatory reasoning models never offer `none`. Missing capability metadata only offers provider defaults.
 - **F4**: search and resume saved sessions for this working directory. Modal selectors support wrapping Up/Down navigation, Page Up/Page Down jumps, filtering, match counts, and clear empty states.
 - **Slash commands**: `/model [query]`, `/reasoning [effort]`, `/resume [id]`, `/login`, and `/help`. Typing `/` opens command suggestions; Up/Down selects a command, Tab completes it, Enter completes a partial command or executes an exact command, and Esc dismisses the input. Commands can be typed or pasted into the prompt; `/model`, `/reasoning`, and `/resume` with no argument open their pickers. `/login` runs the `ri login` flow from the TUI and saves the credential; restart the TUI afterward because provider credentials are fixed when a session starts.
@@ -129,7 +130,7 @@ crates/cli/    ri-agent-cli   CLI configuration and interface selection
 
 ## Providers
 
-The library exposes the `Provider` trait in `crates/agent/src/provider.rs`. `OpenRouter` is the only implementation currently enabled and handles model discovery, reasoning capabilities, chat completions, and PKCE key exchange. Providers own their transport and error translation; sessions depend only on the trait. No non-OpenRouter endpoint is accepted unless an explicit `OPENROUTER_API_KEY` is provided for testing.
+The library exposes the `Provider` trait in `crates/agent/src/provider.rs`. `OpenRouter` and `OpenAI Codex` implement model discovery, reasoning capabilities, and completions. Codex uses ChatGPT OAuth credentials only. Providers own their transport and error translation; sessions depend only on the trait. No non-OpenRouter endpoint is accepted unless an explicit `OPENROUTER_API_KEY` is provided for testing.
 
 ## Authentication security
 

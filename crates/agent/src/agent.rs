@@ -153,6 +153,10 @@ impl Session {
     }
 
     async fn checkpoint(&mut self, interrupted: bool, stable_len: usize) -> Result<()> {
+        // Selecting options in a fresh composer must not create an empty session.
+        if self.messages.is_empty() && self.revision == 0 {
+            return Ok(());
+        }
         let Some(store) = &self.store else {
             return Ok(());
         };

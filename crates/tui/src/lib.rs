@@ -12,7 +12,6 @@ use futures_util::StreamExt;
 use ri_agent::{
     agent::{Selection, Session},
     events::{Event, Output},
-    openrouter,
     sessions::SessionSummary,
 };
 use std::io::{self, IsTerminal};
@@ -69,6 +68,8 @@ async fn execute(command: Command, session: &mut Session) -> Result<Outcome> {
                 std::env::current_exe().context("Finding ri executable")?,
             )
             .arg("login")
+            .arg("--provider")
+            .arg(session.provider().id())
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
@@ -77,9 +78,10 @@ async fn execute(command: Command, session: &mut Session) -> Result<Outcome> {
             if !status.success() {
                 bail!("ri login exited with {status}");
             }
-            return Ok(Outcome::Notice(
-                "OpenRouter login saved. Restart ri to use the new credential.".into(),
-            ));
+            return Ok(Outcome::Notice(format!(
+                "{} login saved. Restart ri to use the new credential.",
+                session.provider().name()
+            )));
         }
         Command::Clear => {
             session.clear();
@@ -105,16 +107,12 @@ impl Drop for RestoreTerminal {
     }
 }
 
-pub async fn run(
-    base_url: String,
-    mut session: Session,
-    prompt: Option<String>,
-    interrupted: bool,
-) -> Result<()> {
+pub async fn run(mut session: Session, prompt: Option<String>, interrupted: bool) -> Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         bail!("The TUI requires a terminal; use -p <prompt> for noninteractive runs");
     }
     let mut app = App::new(&session, interrupted);
+    let provider = session.provider();
     let (events_tx, mut events) = mpsc::unbounded_channel();
     let (commands, mut requests) = mpsc::unbounded_channel();
     let (completed_tx, mut completed) = mpsc::unbounded_channel();
@@ -124,7 +122,8 @@ pub async fn run(
     refresh.send(())?;
     let catalog_worker = async move {
         while refresh_requests.recv().await.is_some() {
-            let result = openrouter::models(&base_url)
+            let result = provider
+                .models()
                 .await
                 .map_err(|error| format!("{error:#}"));
             if catalog_tx.send(result).is_err() {
