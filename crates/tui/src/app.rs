@@ -32,6 +32,22 @@ const SUCCESS: Color = Color::Rgb(102, 204, 170);
 const WARNING: Color = Color::Rgb(240, 190, 92);
 const PANEL: Color = Color::Rgb(49, 60, 78);
 
+fn file_reference(path: &str) -> String {
+    let mut reference = String::from("@");
+    for c in path.strip_prefix("./").unwrap_or(path).chars() {
+        if c.is_control() {
+            reference.extend(c.escape_default());
+        } else {
+            if c.is_whitespace() || c == '\\' {
+                reference.push('\\');
+            }
+            reference.push(c);
+        }
+    }
+    reference.push(' ');
+    reference
+}
+
 type FileSearch = std::pin::Pin<Box<dyn std::future::Future<Output = Result<FileMatches>> + Send>>;
 
 pub struct App {
@@ -427,7 +443,11 @@ impl App {
                             .paths
                             .into_iter()
                             .map(|path| Item {
-                                label: path.escape_debug().to_string(),
+                                label: path
+                                    .strip_prefix("./")
+                                    .unwrap_or(&path)
+                                    .escape_debug()
+                                    .to_string(),
                                 value: path,
                             })
                             .collect(),
@@ -476,10 +496,7 @@ impl App {
                     Kind::Provider => Command::Provider(value),
                     Kind::File => {
                         self.file_search = None;
-                        // JSON quoting preserves spaces and control characters in paths.
-                        self.input.push('@');
-                        self.input.push_str(&serde_json::to_string(&value)?);
-                        self.input.push(' ');
+                        self.input.push_str(&file_reference(&value));
                         return Ok(false);
                     }
                 };
@@ -868,11 +885,11 @@ mod tests {
         assert!(app.file_search.is_some());
         app.paste("space");
         app.files_ready(Ok(FileMatches {
-            paths: vec!["src/other.rs".into(), "src/space name.rs".into()],
+            paths: vec!["./src/other.rs".into(), "./src/space name.rs".into()],
             truncated: false,
         }));
         app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &sender)?;
-        assert_eq!(app.input, "Review @\"src/space name.rs\" ");
+        assert_eq!(app.input, "Review @src/space\\ name.rs ");
         assert!(app.picker.is_none());
         assert!(app.file_search.is_none());
         assert!(receiver.try_recv().is_err());
@@ -882,7 +899,10 @@ mod tests {
         )?;
         app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &sender)?;
         assert!(app.file_search.is_none());
-        assert_eq!(app.input, "Review @\"src/space name.rs\" ");
+        assert_eq!(app.input, "Review @src/space\\ name.rs ");
+        assert_eq!(file_reference("./src/main.rs"), "@src/main.rs ");
+        assert_eq!(file_reference("./日本語.rs"), "@日本語.rs ");
+        assert_eq!(file_reference("./a\nb\\c"), "@a\\nb\\\\c ");
         app.input = "user".into();
         app.key(
             KeyEvent::new(KeyCode::Char('@'), KeyModifiers::NONE),
