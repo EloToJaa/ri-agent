@@ -22,9 +22,9 @@ pub fn suggestions(input: &str) -> Vec<&'static str> {
         .collect()
 }
 
-pub fn complete(input: &str) -> Option<String> {
+pub fn complete(input: &str, selected: usize) -> Option<String> {
     suggestions(input)
-        .first()
+        .get(selected)
         .map(|command| format!("{command} "))
 }
 
@@ -60,8 +60,9 @@ mod tests {
             vec!["/model", "/reasoning", "/resume", "/login", "/help"]
         );
         assert_eq!(suggestions("/rea"), vec!["/reasoning"]);
-        assert_eq!(complete("/mod").as_deref(), Some("/model "));
-        assert!(complete("/unknown").is_none());
+        assert_eq!(complete("/mod", 0).as_deref(), Some("/model "));
+        assert_eq!(complete("/", 2).as_deref(), Some("/resume "));
+        assert!(complete("/unknown", 0).is_none());
     }
 
     #[test]

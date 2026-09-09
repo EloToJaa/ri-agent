@@ -10,7 +10,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Style, Stylize},
     text::Line,
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 use ri_agent::{
     agent::{Selection, Session},
@@ -36,6 +36,7 @@ pub struct App {
     pub catalog_loading: bool,
     picker: Option<Picker>,
     persistence: bool,
+    command_selection: usize,
 }
 
 impl App {
@@ -52,6 +53,7 @@ impl App {
             catalog_loading: true,
             picker: None,
             persistence: session.store().is_some(),
+            command_selection: 0,
         };
         app.append(
             "HARNESS",
@@ -354,6 +356,9 @@ impl App {
             }
             return Ok(false);
         }
+        if self.command_completion_key(key.code, commands)? {
+            return Ok(false);
+        }
         match key.code {
             KeyCode::F(2) if !self.busy => self.open_picker(Kind::Model),
             KeyCode::F(3) if !self.busy => self.open_picker(Kind::Reasoning),
@@ -361,22 +366,78 @@ impl App {
                 self.send(commands, Command::ListSessions)?;
             }
             KeyCode::Enter => self.enter(commands)?,
-            KeyCode::Tab if self.input.trim_start().starts_with('/') => {
-                if let Some(completion) = commands::complete(self.input.trim_start()) {
-                    self.input = completion;
-                }
-            }
             KeyCode::Backspace => {
                 if let Some((index, _)) = self.input.grapheme_indices(true).next_back() {
                     self.input.truncate(index);
+                    self.command_selection = 0;
                 }
             }
-            KeyCode::Char(c) => self.input.push(c),
+            KeyCode::Char(c) => {
+                self.input.push(c);
+                self.command_selection = 0;
+            }
             KeyCode::PageUp => self.scroll_back = self.scroll_back.saturating_add(10),
             KeyCode::PageDown => self.scroll_back = self.scroll_back.saturating_sub(10),
             _ => {}
         }
         Ok(false)
+    }
+
+    fn command_completion_key(
+        &mut self,
+        key: KeyCode,
+        sender: &mpsc::UnboundedSender<Command>,
+    ) -> Result<bool> {
+        if !self.input.trim_start().starts_with('/') || self.input.chars().any(char::is_whitespace)
+        {
+            return Ok(false);
+        }
+        let suggestions = commands::suggestions(self.input.trim_start());
+        if suggestions.is_empty() {
+            return Ok(false);
+        }
+        self.command_selection = self
+            .command_selection
+            .min(suggestions.len().saturating_sub(1));
+        match key {
+            KeyCode::Up => {
+                self.command_selection = self
+                    .command_selection
+                    .checked_sub(1)
+                    .unwrap_or(suggestions.len() - 1);
+            }
+            KeyCode::Down => {
+                self.command_selection = (self.command_selection + 1) % suggestions.len();
+            }
+            KeyCode::Tab => {
+                if let Some(completion) =
+                    commands::complete(self.input.trim_start(), self.command_selection)
+                {
+                    self.input = completion;
+                    self.command_selection = 0;
+                }
+            }
+            KeyCode::Enter => {
+                let selected = suggestions
+                    .get(self.command_selection)
+                    .copied()
+                    .unwrap_or_default();
+                if self.input.trim() == selected {
+                    self.enter(sender)?;
+                } else if let Some(completion) =
+                    commands::complete(self.input.trim_start(), self.command_selection)
+                {
+                    self.input = completion;
+                    self.command_selection = 0;
+                }
+            }
+            KeyCode::Esc => {
+                self.input.clear();
+                self.command_selection = 0;
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
     }
 
     pub fn paste(&mut self, text: &str) {
@@ -531,14 +592,24 @@ impl App {
             height,
         };
         frame.render_widget(Clear, popup);
-        frame.render_widget(
-            Paragraph::new(suggestions.join("\n")).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Commands · Tab completes ")
-                    .border_style(Style::default().fg(Color::Cyan)),
-            ),
-            popup,
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Commands · ↑/↓ choose · Tab complete ")
+            .border_style(Style::default().fg(Color::Cyan));
+        let inner = block.inner(popup);
+        frame.render_widget(block, popup);
+        let items = suggestions
+            .into_iter()
+            .map(ListItem::new)
+            .collect::<Vec<_>>();
+        let selected = self.command_selection.min(items.len().saturating_sub(1));
+        let mut state = ListState::default().with_selected(Some(selected));
+        frame.render_stateful_widget(
+            List::new(items)
+                .highlight_symbol("› ")
+                .highlight_style(Style::default().bg(Color::DarkGray).bold()),
+            inner,
+            &mut state,
         );
     }
 }
@@ -591,6 +662,11 @@ mod tests {
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
             &sender
         )?);
+        app.input = "/".into();
+        app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &sender)?;
+        app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &sender)?;
+        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &sender)?;
+        assert_eq!(app.input, "/resume ");
         app.input = "/help".into();
         app.enter(&sender)?;
         assert!(
