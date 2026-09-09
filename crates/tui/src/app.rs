@@ -9,7 +9,7 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     style::{Color, Style, Stylize},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 use ri_agent::{
@@ -23,6 +23,12 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 const MAX_LINES: usize = 4000;
+const INK: Color = Color::Rgb(196, 205, 219);
+const MUTED: Color = Color::Rgb(103, 116, 137);
+const ACCENT: Color = Color::Rgb(103, 166, 255);
+const SUCCESS: Color = Color::Rgb(102, 204, 170);
+const WARNING: Color = Color::Rgb(240, 190, 92);
+const PANEL: Color = Color::Rgb(49, 60, 78);
 
 pub struct App {
     selection: Selection,
@@ -92,9 +98,9 @@ impl App {
 
     pub fn event(&mut self, event: Event) {
         match event {
-            Event::User(text) => self.append("YOU", &text, Color::Cyan),
-            Event::Assistant(text) => self.append("ASSISTANT", &text, Color::Green),
-            Event::Tool(text) => self.append("TOOL", &text, Color::Blue),
+            Event::User(text) => self.append("YOU", &text, ACCENT),
+            Event::Assistant(text) => self.append("ASSISTANT", &text, SUCCESS),
+            Event::Tool(text) => self.append("TOOL", &text, Color::Rgb(177, 145, 255)),
             Event::Progress(text) => {
                 self.status.clone_from(&text);
                 self.append("ACTIVITY", &text, Color::DarkGray);
@@ -478,65 +484,112 @@ impl App {
     }
 
     pub fn draw(&self, frame: &mut Frame) {
-        let [header, selection, transcript, status, input, help] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
+        let [rail, transcript, composer, help] = Layout::vertical([
+            Constraint::Length(4),
+            Constraint::Min(3),
             Constraint::Length(3),
             Constraint::Length(1),
         ])
         .areas(frame.area());
+        self.draw_rail(frame, rail);
+        self.draw_transcript(frame, transcript);
+        self.draw_composer(frame, composer);
+        let hint = if help.width < 72 {
+            " / commands  ·  F2 model  ·  F3 reasoning  ·  ^D quit"
+        } else {
+            " / commands  ·  F2 model  ·  F3 reasoning  ·  F4 sessions  ·  F5 refresh  ·  ^L new  ·  ^D quit"
+        };
+        frame.render_widget(Paragraph::new(hint).fg(MUTED), help);
+        if let Some(picker) = &self.picker {
+            picker.draw(frame);
+        } else {
+            self.draw_command_completion(frame, composer);
+        }
+    }
+
+    fn draw_rail(&self, frame: &mut Frame, area: Rect) {
+        let state = if self.busy {
+            "● WORKING"
+        } else if self.catalog_loading {
+            "◌ SYNCING"
+        } else {
+            "● READY"
+        };
+        let state_color = if self.busy || self.catalog_loading {
+            WARNING
+        } else {
+            SUCCESS
+        };
+        let persistence = if self.persistence {
+            "SAVED"
+        } else {
+            "EPHEMERAL"
+        };
+        let reasoning = self
+            .selection
+            .reasoning_effort
+            .map_or_else(|| "provider default".into(), |effort| effort.to_string());
+        let lines = vec![
+            Line::from(vec![
+                Span::styled(state, Style::default().fg(state_color).bold()),
+                Span::styled(
+                    format!(
+                        "  OpenRouter  ·  {persistence}  ·  session {}",
+                        short_id(&self.id)
+                    ),
+                    Style::default().fg(MUTED),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled("MODEL  ", Style::default().fg(MUTED)),
+                Span::styled(&self.selection.model, Style::default().fg(ACCENT).bold()),
+                Span::styled("    REASONING  ", Style::default().fg(MUTED)),
+                Span::styled(reasoning, Style::default().fg(INK)),
+            ]),
+        ];
         frame.render_widget(
-            Paragraph::new(format!(
-                " ri-agent / OpenRouter / {}{}",
-                self.id,
-                if self.persistence {
-                    ""
-                } else {
-                    " · not saved"
-                }
-            ))
-            .fg(Color::DarkGray),
-            header,
+            Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" RI · AGENT WORKBENCH ")
+                    .border_style(Style::default().fg(PANEL)),
+            ),
+            area,
         );
-        frame.render_widget(
-            Paragraph::new(format!(
-                " {} · reasoning: {}",
-                self.selection.model,
-                self.selection
-                    .reasoning_effort
-                    .map_or_else(|| "provider default".into(), |effort| effort.to_string())
-            ))
-            .fg(Color::Cyan)
-            .bold(),
-            selection,
-        );
-        let lines = self.wrapped_transcript(usize::from(transcript.width.max(1)));
+    }
+
+    fn draw_transcript(&self, frame: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" TRANSCRIPT ")
+            .border_style(Style::default().fg(PANEL));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let lines = self.wrapped_transcript(usize::from(inner.width.max(1)));
         let start = lines
             .len()
-            .saturating_sub(usize::from(transcript.height))
+            .saturating_sub(usize::from(inner.height))
             .saturating_sub(usize::from(self.scroll_back));
         frame.render_widget(
             Paragraph::new(
                 lines
                     .into_iter()
                     .skip(start)
-                    .take(usize::from(transcript.height))
+                    .take(usize::from(inner.height))
                     .collect::<Vec<_>>(),
-            ),
-            transcript,
+            )
+            .fg(INK),
+            inner,
         );
-        frame.render_widget(
-            Paragraph::new(self.status.as_str()).fg(Color::Yellow),
-            status,
-        );
+    }
+
+    fn draw_composer(&self, frame: &mut Frame, area: Rect) {
         let title = if self.busy {
-            " Draft · agent working "
+            " DRAFT · agent working "
         } else {
-            " Prompt "
+            " PROMPT · Enter sends "
         };
-        let available = usize::from(input.width.saturating_sub(3));
+        let available = usize::from(area.width.saturating_sub(3));
         let mut visible = self.input.as_str();
         while visible.width() > available {
             let Some(first) = visible.graphemes(true).next() else {
@@ -544,32 +597,22 @@ impl App {
             };
             visible = visible.get(first.len()..).unwrap_or_default();
         }
+        let border = if self.busy { WARNING } else { ACCENT };
         frame.render_widget(
-            Paragraph::new(visible).block(
+            Paragraph::new(visible).fg(INK).block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title(title)
-                    .border_style(Style::default().fg(Color::Cyan)),
+                    .title_bottom(format!(" {} ", self.status))
+                    .border_style(Style::default().fg(border)),
             ),
-            input,
+            area,
         );
-        if input.width > 2 && input.height > 2 && self.picker.is_none() {
+        if area.width > 2 && area.height > 2 && self.picker.is_none() {
             frame.set_cursor_position((
-                input.x + 1 + u16::try_from(visible.width()).unwrap_or_default(),
-                input.y + 1,
+                area.x + 1 + u16::try_from(visible.width()).unwrap_or_default(),
+                area.y + 1,
             ));
-        }
-        frame.render_widget(
-            Paragraph::new(
-                "F2 model · F3 reasoning · F4 sessions · F5 refresh · Ctrl+L new · Ctrl+C quit",
-            )
-            .fg(Color::DarkGray),
-            help,
-        );
-        if let Some(picker) = &self.picker {
-            picker.draw(frame);
-        } else {
-            self.draw_command_completion(frame, input);
         }
     }
 
@@ -612,6 +655,10 @@ impl App {
             &mut state,
         );
     }
+}
+
+fn short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
 }
 
 #[cfg(test)]

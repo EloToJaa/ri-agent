@@ -34,12 +34,12 @@ The executable is named `ri`. `ri login` authenticates with OpenRouter using a b
 
 ### Interactive interface
 
-The TUI keeps conversation history across prompts and shows assistant responses, tool results, and model/tool activity. Responses appear when complete, not token-by-token.
+The TUI uses a responsive agent-workbench layout: a provider/session rail, persistent model and reasoning state, a bordered transcript, an activity-aware composer, and searchable modal selectors. It keeps conversation history across prompts and shows assistant responses, tool results, and model/tool activity. Responses appear when complete, not token-by-token.
 
 - **Ctrl+D** or **Ctrl+C**: quit.
 - **F2**: search OpenRouter’s live catalog of tool-capable models. Switching models resets the reasoning override and removes old model-specific reasoning metadata, but preserves conversation text and tool results.
 - **F3**: select reasoning effort or **Provider default**. Choices follow the selected model’s `reasoning.supported_efforts`; mandatory reasoning models never offer `none`. Missing capability metadata only offers provider defaults.
-- **F4**: search and resume saved sessions for this working directory.
+- **F4**: search and resume saved sessions for this working directory. Modal selectors support wrapping Up/Down navigation, Page Up/Page Down jumps, filtering, match counts, and clear empty states.
 - **Slash commands**: `/model [query]`, `/reasoning [effort]`, `/resume [id]`, `/login`, and `/help`. Typing `/` opens command suggestions; Up/Down selects a command, Tab completes it, Enter completes a partial command or executes an exact command, and Esc dismisses the input. Commands can be typed or pasted into the prompt; `/model`, `/reasoning`, and `/resume` with no argument open their pickers. `/login` runs the `ri login` flow from the TUI and saves the credential; restart the TUI afterward because provider credentials are fixed when a session starts.
 - **F5**: refresh the catalog after a network error. The configured model still works without a catalog when using provider-default reasoning.
 - **Enter**: send a prompt when idle. You can draft the next prompt while the agent works. Model, reasoning, and session changes are only available when idle.

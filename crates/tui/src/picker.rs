@@ -60,11 +60,23 @@ impl Picker {
                 }
                 self.selected = 0;
             }
-            KeyCode::Up => self.selected = self.selected.saturating_sub(1),
+            KeyCode::Up => {
+                let count = self.filtered().len();
+                if count > 0 {
+                    self.selected = self.selected.checked_sub(1).unwrap_or(count - 1);
+                }
+            }
             KeyCode::Down => {
+                let count = self.filtered().len();
+                if count > 0 {
+                    self.selected = (self.selected + 1) % count;
+                }
+            }
+            KeyCode::PageUp => self.selected = self.selected.saturating_sub(8),
+            KeyCode::PageDown => {
                 self.selected = self
                     .selected
-                    .saturating_add(1)
+                    .saturating_add(8)
                     .min(self.filtered().len().saturating_sub(1));
             }
             KeyCode::Enter => {
@@ -80,28 +92,30 @@ impl Picker {
 
     pub fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
+        let height = area.height.saturating_sub(4).min(28);
+        let width = area.width.saturating_sub(4).min(86);
         let [_, center, _] = Layout::vertical([
-            Constraint::Percentage(10),
-            Constraint::Percentage(80),
-            Constraint::Percentage(10),
+            Constraint::Fill(1),
+            Constraint::Length(height),
+            Constraint::Fill(1),
         ])
         .areas(area);
         let [_, center, _] = Layout::horizontal([
-            Constraint::Percentage(5),
-            Constraint::Percentage(90),
-            Constraint::Percentage(5),
+            Constraint::Fill(1),
+            Constraint::Length(width),
+            Constraint::Fill(1),
         ])
         .areas(center);
         frame.render_widget(Clear, center);
         let title = match self.kind {
-            Kind::Model => " OpenRouter models · tool-capable only ",
-            Kind::Reasoning => " Reasoning effort · advertised model capabilities ",
-            Kind::Session => " Saved sessions · this working directory ",
+            Kind::Model => " MODEL · OpenRouter tool-capable catalog ",
+            Kind::Reasoning => " REASONING · available for selected model ",
+            Kind::Session => " SESSION · current working directory ",
         };
         let block = Block::default()
             .borders(Borders::ALL)
             .title(title)
-            .border_style(Style::default().fg(Color::Cyan));
+            .border_style(Style::default().fg(Color::Rgb(103, 166, 255)));
         let inner = block.inner(center);
         frame.render_widget(block, center);
         let [search, list, help] = Layout::vertical([
@@ -110,25 +124,41 @@ impl Picker {
             Constraint::Length(1),
         ])
         .areas(inner);
-        frame.render_widget(
-            Paragraph::new(format!("Search: {}", self.query)).fg(Color::Yellow),
-            search,
-        );
-        let items = self
-            .filtered()
-            .iter()
-            .map(|item| ListItem::new(item.label.clone()))
-            .collect::<Vec<_>>();
+        let filtered = self.filtered();
+        let query = if self.query.is_empty() {
+            "Type to filter…".to_owned()
+        } else {
+            format!("› {}", self.query)
+        };
+        frame.render_widget(Paragraph::new(query).fg(Color::Rgb(240, 190, 92)), search);
+        let items = if filtered.is_empty() {
+            vec![ListItem::new("  No matches")]
+        } else {
+            filtered
+                .iter()
+                .map(|item| ListItem::new(item.label.clone()))
+                .collect::<Vec<_>>()
+        };
         let mut state = ListState::default().with_selected(Some(self.selected));
         frame.render_stateful_widget(
             List::new(items)
-                .highlight_style(Style::default().bg(Color::DarkGray).bold())
+                .highlight_style(
+                    Style::default()
+                        .bg(Color::Rgb(49, 60, 78))
+                        .fg(Color::White)
+                        .bold(),
+                )
                 .highlight_symbol("› "),
             list,
             &mut state,
         );
         frame.render_widget(
-            Paragraph::new("↑/↓ choose · Enter apply · Esc cancel").fg(Color::DarkGray),
+            Paragraph::new(format!(
+                "↑/↓ choose · PgUp/PgDn jump · Enter apply · Esc cancel    {} match{}",
+                filtered.len(),
+                if filtered.len() == 1 { "" } else { "es" }
+            ))
+            .fg(Color::DarkGray),
             help,
         );
     }
