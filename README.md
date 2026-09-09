@@ -17,7 +17,7 @@ nix run . -- --no-save                # Try the TUI without saving history
 nix run . -- --help
 ```
 
-The first run builds the application and its vendored Lua/SQLite dependencies. Bash is included in the packaged runtime; other commands invoked by the agent use your existing `PATH`. Use F2 for models, F3 for reasoning, and F4 for saved sessions.
+The first run builds the application and its vendored Lua/SQLite dependencies. Bash, ripgrep (`rg`), and `fd` are included in the packaged runtime; other commands invoked by the agent use your existing `PATH`. Use F2 for models, F3 for reasoning, and F4 for saved sessions.
 
 For an installed binary, use `ri login` directly. For development or a fresh checkout, use `nix run . -- login` as shown above.
 
@@ -31,7 +31,7 @@ cargo run -p ri-agent-cli -- -p "Explain crates/agent/src/agent.rs"  # One-shot 
 cargo run -p ri-agent-cli -- --tui -p "Inspect this project"
 ```
 
-The executable is named `ri`. `ri login` authenticates with OpenRouter; `ri login --provider openai-codex` authenticates with ChatGPT OAuth for Codex. The default provider is OpenRouter and `--provider openai-codex` selects Codex. OpenRouter login using a browser-based PKCE flow and a localhost callback. On headless or restricted systems, use `ri login --api-key` to paste a key without displaying it, or `ri login --manual` to open the browser and paste the complete redirected callback URL back into the terminal. Manual mode still uses S256 PKCE; the URL contains only a short-lived, single-use authorization code. Without Nix, install Rust 1.96+, a C compiler (for vendored Lua), and Bash. The Nix shell sets `MODEL=minimax/minimax-m3:free`; unset it to use the model from Lua, or override it with `--model`.
+The executable is named `ri`. `ri login` authenticates with OpenRouter; `ri login --provider openai-codex` authenticates with ChatGPT OAuth for Codex. The default provider is OpenRouter and `--provider openai-codex` selects Codex. OpenRouter login using a browser-based PKCE flow and a localhost callback. On headless or restricted systems, use `ri login --api-key` to paste a key without displaying it, or `ri login --manual` to open the browser and paste the complete redirected callback URL back into the terminal. Manual mode still uses S256 PKCE; the URL contains only a short-lived, single-use authorization code. Without Nix, install Rust 1.96+, a C compiler (for vendored Lua), Bash, ripgrep (`rg`), and `fd` (available as `fd` on `PATH`). The Nix shell sets `MODEL=minimax/minimax-m3:free`; unset it to use the model from Lua, or override it with `--model`.
 
 ### Interactive interface
 
@@ -43,6 +43,7 @@ The TUI uses a responsive agent-workbench layout: a provider/session rail, persi
 - **F4**: search and resume saved sessions for this working directory. Modal selectors support wrapping Up/Down navigation, Page Up/Page Down jumps, filtering, match counts, and clear empty states.
 - **Slash commands**: `/model [query]`, `/reasoning [effort]`, `/resume [id]`, `/login`, and `/help`. Typing `/` opens command suggestions; Up/Down selects a command, Tab completes it, Enter completes a partial command or executes an exact command, and Esc dismisses the input. Commands can be typed or pasted into the prompt; `/model`, `/reasoning`, and `/resume` with no argument open their pickers. `/login` runs the `ri login` flow from the TUI and saves the credential; restart the TUI afterward because provider credentials are fixed when a session starts.
 - **F5**: refresh the catalog after a network error. The configured model still works without a catalog when using provider-default reasoning.
+- **@** at the start of a prompt or after whitespace: open a searchable file picker backed by `fd` in the current working directory. Type or paste to filter, use Up/Down to select, Enter to insert a JSON-quoted reference such as `@"src/main.rs"`, and Esc to cancel. Selection inserts a path, not file contents; the agent can use Read to inspect it. Discovery respects ignore files and excludes hidden files, runs asynchronously with a 10-second timeout, and retains at most 1 MiB of paths (with a truncation notice).
 - **Enter**: send a prompt when idle. You can draft the next prompt while the agent works. Model, reasoning, and session changes are only available when idle.
 - **Backspace**: delete the last character/grapheme.
 - **Page Up / Page Down**: scroll the transcript.
@@ -87,7 +88,7 @@ The file returns a table with:
 
 Hooks return a replacement string or `nil` to leave text unchanged. Hook errors fail the current turn. Tool errors are returned to the model for recovery. Custom tool results are capped by `max_output_bytes` before entering model history.
 
-**Lua is trusted executable code, not a sandbox.** It can access local files, environment variables, and processes. Callbacks run on blocking threads, but have no execution timeout and cannot be forcibly cancelled; a blocked callback can delay process exit. `command_timeout` applies only to built-in Bash. Keep callbacks finite, avoid terminal writes (`print`, `io.write`, subprocess output) while using the TUI, and do not load untrusted configuration. No credentials belong in configuration files; use `OPENROUTER_API_KEY`.
+**Lua is trusted executable code, not a sandbox.** It can access local files, environment variables, and processes. Callbacks run on blocking threads, but have no execution timeout and cannot be forcibly cancelled; a blocked callback can delay process exit. `command_timeout` applies to built-in Bash, Search, and Find. Keep callbacks finite, avoid terminal writes (`print`, `io.write`, subprocess output) while using the TUI, and do not load untrusted configuration. No credentials belong in configuration files; use `OPENROUTER_API_KEY`.
 
 ### Options and precedence
 
@@ -115,9 +116,11 @@ All numeric limits must be positive. Truncation adds an `[output truncated]` mar
 
 - **Read**: read a file, subject to the output limit.
 - **Write**: create or overwrite a file; the parent directory must exist.
+- **Search**: search file contents with `rg`, returning matching paths, line numbers, and text. Arguments: `pattern` (regular expression), optional `path` (defaults to `.`). No matches is a normal result.
+- **Find**: discover files with `fd`. Arguments: `pattern` (filename regular expression; empty lists all files), optional `path` (defaults to `.`). Returns a JSON array of paths plus a truncation flag. Search and Find respect ignore files and skip hidden files by default; both apply `command_timeout` and `max_output_bytes` and invoke commands directly without shell interpolation.
 - **Bash**: run a command in a fresh noninteractive shell, returning stdout, stderr, and exit status. Shell state does not persist.
 
-Consecutive Read calls run concurrently (up to four). Mutating and Lua tools run sequentially. Tools operate with the process's working directory and permissions, **without approval prompts or filesystem sandboxing**. File contents and command output can be sent to the model provider.
+Consecutive Read calls run concurrently (up to four). Other tools run sequentially. Tools operate with the process's working directory and permissions, **without approval prompts or filesystem sandboxing**. File contents and command output can be sent to the model provider.
 
 ## Workspace
 

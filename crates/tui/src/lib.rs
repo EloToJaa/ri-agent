@@ -154,6 +154,9 @@ pub async fn run(mut session: Session, prompt: Option<String>, interrupted: bool
         loop {
             terminal.draw(|frame| app.draw(frame))?;
             tokio::select! {
+                result = app.wait_files() => {
+                    app.files_ready(result);
+                }
                 event = events.recv() => {
                     app.event(event.context("Agent worker stopped")?);
                 }

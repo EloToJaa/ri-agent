@@ -74,7 +74,9 @@ impl LuaConfig {
                 }
             }
         }
-        let mut names: HashSet<String> = ["Read", "Write", "Bash"].map(String::from).into();
+        let mut names: HashSet<String> = ["Read", "Write", "Bash", "Search", "Find"]
+            .map(String::from)
+            .into();
         let mut definitions = Vec::new();
         let handlers = lua.create_table()?;
         if let Some(tools) = root.get::<Option<Table>>("tools")? {

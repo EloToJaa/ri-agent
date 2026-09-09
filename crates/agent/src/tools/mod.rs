@@ -1,4 +1,6 @@
 mod bash;
+mod discovery;
+pub use discovery::{FileMatches, find_files};
 mod read;
 mod write;
 
@@ -19,7 +21,13 @@ pub trait Tool: Sync {
 }
 
 // Register each tool here to enable both its API definition and execution.
-static TOOLS: &[&dyn Tool] = &[&read::Read, &write::Write, &bash::Bash];
+static TOOLS: &[&dyn Tool] = &[
+    &read::Read,
+    &write::Write,
+    &bash::Bash,
+    &discovery::Search,
+    &discovery::Find,
+];
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

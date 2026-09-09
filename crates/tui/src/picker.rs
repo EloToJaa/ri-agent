@@ -12,6 +12,7 @@ pub enum Kind {
     Model,
     Reasoning,
     Session,
+    File,
 }
 
 pub struct Item {
@@ -38,6 +39,11 @@ impl Picker {
             query: String::new(),
             selected,
         }
+    }
+
+    pub fn set_items(&mut self, items: Vec<Item>) {
+        self.items = items;
+        self.selected = 0;
     }
 
     fn filtered(&self) -> Vec<&Item> {
@@ -111,6 +117,7 @@ impl Picker {
             Kind::Model => " MODEL · OpenRouter tool-capable catalog ",
             Kind::Reasoning => " REASONING · available for selected model ",
             Kind::Session => " SESSION · current working directory ",
+            Kind::File => " FILE · fd · current working directory ",
         };
         let block = Block::default()
             .borders(Borders::ALL)

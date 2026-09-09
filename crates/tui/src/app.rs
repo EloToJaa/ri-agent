@@ -13,8 +13,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 use ri_agent::{
+    FileMatches,
     agent::{Selection, Session},
     events::Event,
+    find_files,
     openrouter::{Model, ReasoningEffort},
 };
 use std::collections::VecDeque;
@@ -30,6 +32,8 @@ const SUCCESS: Color = Color::Rgb(102, 204, 170);
 const WARNING: Color = Color::Rgb(240, 190, 92);
 const PANEL: Color = Color::Rgb(49, 60, 78);
 
+type FileSearch = std::pin::Pin<Box<dyn std::future::Future<Output = Result<FileMatches>> + Send>>;
+
 pub struct App {
     selection: Selection,
     id: String,
@@ -43,6 +47,7 @@ pub struct App {
     picker: Option<Picker>,
     persistence: bool,
     command_selection: usize,
+    file_search: Option<FileSearch>,
 }
 
 impl App {
@@ -60,6 +65,7 @@ impl App {
             picker: None,
             persistence: session.store().is_some(),
             command_selection: 0,
+            file_search: None,
         };
         app.append(
             "HARNESS",
@@ -315,9 +321,47 @@ impl App {
                         .map_or_else(|| "default".into(), |effort| effort.to_string()),
                 )
             }
-            Kind::Session => return,
+            Kind::Session | Kind::File => return,
         };
         self.picker = Some(Picker::new(kind, items, &current));
+    }
+
+    pub async fn wait_files(&mut self) -> Result<FileMatches> {
+        let result = match &mut self.file_search {
+            Some(search) => search.await,
+            None => std::future::pending().await,
+        };
+        self.file_search = None;
+        result
+    }
+
+    pub fn files_ready(&mut self, result: Result<FileMatches>) {
+        self.file_search = None;
+        match result {
+            Ok(files) => {
+                self.status = if files.truncated {
+                    "File list truncated; use Find to search a narrower directory".into()
+                } else {
+                    format!("{} files found", files.paths.len())
+                };
+                if let Some(picker) = &mut self.picker {
+                    picker.set_items(
+                        files
+                            .paths
+                            .into_iter()
+                            .map(|path| Item {
+                                label: path.escape_debug().to_string(),
+                                value: path,
+                            })
+                            .collect(),
+                    );
+                }
+            }
+            Err(error) => {
+                self.picker = None;
+                self.append("ERROR", &format!("{error:#}"), Color::Red);
+            }
+        }
     }
 
     pub fn key(
@@ -333,6 +377,7 @@ impl App {
         if let Some(picker) = &mut self.picker {
             if key.code == KeyCode::Esc {
                 self.picker = None;
+                self.file_search = None;
                 return Ok(false);
             }
             let kind = picker.kind;
@@ -351,6 +396,14 @@ impl App {
                         },
                     }),
                     Kind::Session => Command::Resume(value),
+                    Kind::File => {
+                        self.file_search = None;
+                        // JSON quoting preserves spaces and control characters in paths.
+                        self.input.push('@');
+                        self.input.push_str(&serde_json::to_string(&value)?);
+                        self.input.push(' ');
+                        return Ok(false);
+                    }
                 };
                 self.send(commands, command)?;
             }
@@ -377,6 +430,24 @@ impl App {
                     self.input.truncate(index);
                     self.command_selection = 0;
                 }
+            }
+            KeyCode::Char('@')
+                if self.input.is_empty() || self.input.ends_with(char::is_whitespace) =>
+            {
+                self.picker = Some(Picker::new(Kind::File, Vec::new(), ""));
+                self.status = "Finding files with fd…".into();
+                self.file_search = Some(Box::pin(async {
+                    find_files(
+                        "",
+                        ".",
+                        ri_agent::limits::Limits {
+                            command_timeout: std::time::Duration::from_secs(10),
+                            max_output_bytes: std::num::NonZeroUsize::MIN
+                                .saturating_add(1024 * 1024 - 1),
+                        },
+                    )
+                    .await
+                }));
             }
             KeyCode::Char(c) => {
                 self.input.push(c);
@@ -447,7 +518,12 @@ impl App {
     }
 
     pub fn paste(&mut self, text: &str) {
-        if self.picker.is_some() {
+        if let Some(picker) = &mut self.picker {
+            if picker.kind == Kind::File {
+                for c in text.chars().filter(|c| !c.is_control()) {
+                    picker.key(KeyCode::Char(c));
+                }
+            }
             return;
         }
         self.input.extend(
@@ -587,7 +663,7 @@ impl App {
         let title = if self.busy {
             " DRAFT · agent working "
         } else {
-            " PROMPT · Enter sends "
+            " PROMPT · Enter sends · @ files "
         };
         let available = usize::from(area.width.saturating_sub(3));
         let mut visible = self.input.as_str();
@@ -698,6 +774,63 @@ mod tests {
             app.open_picker(Kind::Reasoning);
             terminal.draw(|frame| app.draw(frame))?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn selects_file_references_without_submitting_and_can_cancel() -> Result<()> {
+        let mut app = app()?;
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        app.input = "Review ".into();
+        app.key(
+            KeyEvent::new(KeyCode::Char('@'), KeyModifiers::NONE),
+            &sender,
+        )?;
+        assert!(app.file_search.is_some());
+        app.paste("space");
+        app.files_ready(Ok(FileMatches {
+            paths: vec!["src/other.rs".into(), "src/space name.rs".into()],
+            truncated: false,
+        }));
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &sender)?;
+        assert_eq!(app.input, "Review @\"src/space name.rs\" ");
+        assert!(app.picker.is_none());
+        assert!(app.file_search.is_none());
+        assert!(receiver.try_recv().is_err());
+        app.key(
+            KeyEvent::new(KeyCode::Char('@'), KeyModifiers::NONE),
+            &sender,
+        )?;
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &sender)?;
+        assert!(app.file_search.is_none());
+        assert_eq!(app.input, "Review @\"src/space name.rs\" ");
+        app.input = "user".into();
+        app.key(
+            KeyEvent::new(KeyCode::Char('@'), KeyModifiers::NONE),
+            &sender,
+        )?;
+        assert_eq!(app.input, "user@");
+        assert!(app.picker.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn file_picker_errors_leave_prompt_intact() -> Result<()> {
+        let mut app = app()?;
+        let (sender, _) = mpsc::unbounded_channel();
+        app.input = "Review ".into();
+        app.key(
+            KeyEvent::new(KeyCode::Char('@'), KeyModifiers::NONE),
+            &sender,
+        )?;
+        app.files_ready(Err(anyhow::anyhow!("fd unavailable")));
+        assert!(app.picker.is_none());
+        assert_eq!(app.input, "Review ");
+        assert!(
+            app.lines
+                .iter()
+                .any(|line| line.to_string().contains("fd unavailable"))
+        );
         Ok(())
     }
 

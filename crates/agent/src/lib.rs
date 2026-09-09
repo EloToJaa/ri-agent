@@ -11,3 +11,4 @@ mod message;
 mod response;
 mod response_processor;
 mod tools;
+pub use tools::{FileMatches, find_files};

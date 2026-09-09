@@ -273,7 +273,7 @@ async fn sqlite_resume_preserves_reasoning_tool_history_and_recovers_after_faile
     let requests = requests(handle)?;
     assert_eq!(
         field(&requests, "/0/tools")?.as_array().map(Vec::len),
-        Some(4)
+        Some(6)
     );
     assert_eq!(field(&requests, "/0/messages/0/content")?, "task: first");
     assert_eq!(field(&requests, "/0/reasoning/effort")?, "high");

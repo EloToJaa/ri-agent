@@ -43,7 +43,13 @@
           buildInputs = [ pkgs.openssl ];
           postInstall = ''
             wrapProgram "$out/bin/ri" \
-              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.bash ]}
+              --prefix PATH : ${
+                pkgs.lib.makeBinPath [
+                  pkgs.bash
+                  pkgs.ripgrep
+                  pkgs.fd
+                ]
+              }
           '';
         };
 
@@ -61,6 +67,8 @@
             rustfmt
             clippy
             rust-analyzer
+            ripgrep
+            fd
           ];
           MODEL = "minimax/minimax-m3:free";
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
