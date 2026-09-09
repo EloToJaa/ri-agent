@@ -7,7 +7,8 @@ An asynchronous Rust agent harness with a Ratatui terminal interface, a one-shot
 With Nix, launch the packaged TUI directly (no development shell needed):
 
 ```sh
-export OPENROUTER_API_KEY='your-api-key'
+nix run . -- login                 # Browser PKCE login; saves ~/.ri/credentials.json
+# or: nix run . -- login --api-key   # Hidden prompt for an existing OpenRouter key
 nix run
 nix run . -- --resume                 # Resume this directory's latest session
 nix run . -- --no-save                # Try the TUI without saving history
@@ -15,6 +16,8 @@ nix run . -- --help
 ```
 
 The first run builds the application and its vendored Lua/SQLite dependencies. Bash is included in the packaged runtime; other commands invoked by the agent use your existing `PATH`. Use F2 for models, F3 for reasoning, and F4 for saved sessions.
+
+For an installed binary, use `ri login` directly. For development or a fresh checkout, use `nix run . -- login` as shown above.
 
 For development:
 
@@ -26,7 +29,7 @@ cargo run -p ri-agent-cli -- -p "Explain crates/agent/src/agent.rs"  # One-shot 
 cargo run -p ri-agent-cli -- --tui -p "Inspect this project"
 ```
 
-The executable is named `ri`. Without Nix, install Rust 1.96+, a C compiler (for vendored Lua), and Bash. The Nix shell sets `MODEL=minimax/minimax-m3:free`; unset it to use the model from Lua, or override it with `--model`.
+The executable is named `ri`. `ri login` authenticates with OpenRouter using a browser-based PKCE flow and a localhost callback. On headless systems, use `ri login --api-key` to paste a key without displaying it. Without Nix, install Rust 1.96+, a C compiler (for vendored Lua), and Bash. The Nix shell sets `MODEL=minimax/minimax-m3:free`; unset it to use the model from Lua, or override it with `--model`.
 
 ### Interactive interface
 
@@ -46,7 +49,7 @@ The visible transcript retains up to 4,000 lines; model conversation history rem
 
 ## SQLite sessions
 
-All default harness files live under `~/.ri`: Lua configuration in `~/.ri/config.lua` and SQLite sessions in `~/.ri/sessions.sqlite3`. The directory is created automatically when saving is enabled. Session lists are scoped to the canonical current working directory. SQLite stores prompts, assistant messages, tool results, reasoning metadata, and the selected model/effort; API client credentials and Lua code are not serialized. On Unix, new directories use mode `0700` and the database uses `0600`. Stored conversation/tool contents can themselves contain secrets; the database is **not encrypted**.
+All default harness files live under `~/.ri`: Lua configuration in `~/.ri/config.lua`, SQLite sessions in `~/.ri/sessions.sqlite3`, and OpenRouter credentials in `~/.ri/credentials.json`. Credentials use restrictive file permissions and are never stored in session records. `OPENROUTER_API_KEY` overrides the saved credential. The credentials file is plaintext; protect your home directory. The directory is created automatically when saving is enabled. Session lists are scoped to the canonical current working directory. SQLite stores prompts, assistant messages, tool results, reasoning metadata, and the selected model/effort; API client credentials and Lua code are not serialized. On Unix, new directories use mode `0700` and the database uses `0600`. Stored conversation/tool contents can themselves contain secrets; the database is **not encrypted**.
 
 ```sh
 cargo run -p ri-agent-cli -- --sessions           # List this directory's sessions; no API key needed
@@ -120,6 +123,14 @@ crates/lua/    ri-agent-lua   Lua settings, hooks, custom-tool runtime
 crates/tui/    ri-agent-tui   Ratatui interface using the main library
 crates/cli/    ri-agent-cli   CLI configuration and interface selection
 ```
+
+## Providers
+
+The library exposes the `Provider` trait in `crates/agent/src/provider.rs`. `OpenRouter` is the only implementation currently enabled and handles model discovery, reasoning capabilities, chat completions, and PKCE key exchange. Providers own their transport and error translation; sessions depend only on the trait. No non-OpenRouter endpoint is accepted unless an explicit `OPENROUTER_API_KEY` is provided for testing.
+
+## Authentication security
+
+Browser login uses S256 PKCE with a random verifier, a random localhost port, a single-use callback, and no API key in the browser URL. The callback listener is bound to loopback and has a 120-second read timeout. `ri login --api-key` uses a hidden terminal prompt and validates the key before saving. Login errors avoid echoing keys or authorization codes. If a browser cannot open, the URL is printed for manual opening.
 
 The root Cargo manifest is workspace-only. `crates/agent/src/openrouter.rs` handles OpenRouter catalog capabilities; `crates/agent/src/sessions.rs` handles SQLite persistence.
 

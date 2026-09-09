@@ -3,10 +3,14 @@ use clap::Parser;
 use ri_agent::{
     agent::{AgentConfig, Session},
     config::{LuaConfig, ReasoningEffort},
+    credentials,
     events::Output,
     limits, openrouter,
+    openrouter::OpenRouter,
     sessions::SessionStore,
 };
+mod login;
+
 use std::{
     env,
     num::{NonZeroU64, NonZeroUsize},
@@ -20,6 +24,8 @@ use std::{
     about = "OpenRouter agent harness with Lua configuration and a Ratatui interface"
 )]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
     /// Run a single prompt without the TUI (unless --tui is also supplied).
     #[arg(short = 'p', long)]
     prompt: Option<String>,
@@ -56,9 +62,22 @@ struct Args {
     no_save: bool,
 }
 
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Authenticate this installation with `OpenRouter`.
+    Login {
+        /// Paste an existing key instead of opening a browser.
+        #[arg(long)]
+        api_key: bool,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(Command::Login { api_key }) = args.command {
+        return login::run(api_key).await;
+    }
     let store = if args.no_save {
         None
     } else {
@@ -88,8 +107,8 @@ async fn main() -> Result<()> {
         .base_url
         .or_else(|| settings.base_url.clone())
         .unwrap_or_else(|| openrouter::DEFAULT_BASE_URL.into());
-    let api_key =
-        env::var("OPENROUTER_API_KEY").context("OPENROUTER_API_KEY is not set or is invalid")?;
+    let api_key = credentials::resolve(&base_url)?;
+    let provider = std::sync::Arc::new(OpenRouter::new(&base_url, api_key)?);
     let config = AgentConfig {
         model: args
             .model
@@ -113,7 +132,7 @@ async fn main() -> Result<()> {
         },
         lua,
     };
-    let mut session = Session::new(base_url.clone(), api_key, config, Output::default());
+    let mut session = Session::new(provider, config, Output::default());
     if let Some(store) = store {
         session = session.with_store(store);
     }

@@ -27,7 +27,9 @@ pub struct SavedSession {
     pub(crate) revision: i64,
 }
 
-fn legacy_provider() -> String { "openrouter".into() }
+fn legacy_provider() -> String {
+    "openrouter".into()
+}
 
 #[derive(Debug, Clone)]
 pub struct SessionSummary {

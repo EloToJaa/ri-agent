@@ -431,8 +431,10 @@ mod tests {
 
     fn app() -> Result<App> {
         let session = Session::new(
-            "http://localhost".into(),
-            "mock".into(),
+            std::sync::Arc::new(ri_agent::openrouter::OpenRouter::new(
+                "http://localhost",
+                ri_agent::credentials::api_key("mock")?,
+            )?),
             AgentConfig {
                 model: "mock".into(),
                 reasoning_effort: None,

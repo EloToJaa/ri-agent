@@ -205,6 +205,7 @@ fn config() -> Result<ri_agent::agent::AgentConfig> {
     })
 }
 
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn sqlite_resume_preserves_reasoning_tool_history_and_recovers_after_failed_turns()
 -> Result<()> {
@@ -234,8 +235,10 @@ async fn sqlite_resume_preserves_reasoning_tool_history_and_recovers_after_faile
     ])?;
     let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
     let mut session = Session::new(
-        format!("http://{address}"),
-        "mock-key".into(),
+        std::sync::Arc::new(ri_agent::openrouter::OpenRouter::new(
+            &format!("http://{address}"),
+            ri_agent::credentials::api_key("mock-key")?,
+        )?),
         config()?,
         Output::channel(sender.clone()),
     );
@@ -249,8 +252,10 @@ async fn sqlite_resume_preserves_reasoning_tool_history_and_recovers_after_faile
     session.submit("first".into()).await?;
     drop(session);
     let mut session = Session::new(
-        format!("http://{address}"),
-        "mock-key".into(),
+        std::sync::Arc::new(ri_agent::openrouter::OpenRouter::new(
+            &format!("http://{address}"),
+            ri_agent::credentials::api_key("mock-key")?,
+        )?),
         config()?,
         Output::channel(sender),
     )

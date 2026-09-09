@@ -2,13 +2,20 @@
 use anyhow::{Context, Result, bail};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use std::{env, fs, io::Write, path::{Path, PathBuf}};
+use std::{
+    env, fs,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 pub type ApiKey = SecretString;
 
-pub fn api_key(value: String) -> Result<ApiKey> {
-    let value = value.trim();
-    if value.is_empty() || value.chars().any(char::is_whitespace) || value.chars().any(char::is_control) {
+pub fn api_key(value: impl AsRef<str>) -> Result<ApiKey> {
+    let value = value.as_ref().trim();
+    if value.is_empty()
+        || value.chars().any(char::is_whitespace)
+        || value.chars().any(char::is_control)
+    {
         bail!("API key must be nonempty and contain no whitespace or control characters");
     }
     Ok(value.to_owned().into())
@@ -20,10 +27,14 @@ pub fn default_path() -> Result<PathBuf> {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Credentials { openrouter: StoredKey }
+struct Credentials {
+    openrouter: StoredKey,
+}
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct StoredKey { api_key: String }
+struct StoredKey {
+    api_key: String,
+}
 
 pub fn load(path: &Path) -> Result<Option<ApiKey>> {
     match fs::symlink_metadata(path) {
@@ -37,13 +48,16 @@ pub fn load(path: &Path) -> Result<Option<ApiKey>> {
             {
                 use std::os::unix::fs::PermissionsExt;
                 if metadata.permissions().mode() & 0o077 != 0 {
-                    bail!("Credential file permissions are too open; run chmod 600 on ~/.ri/credentials.json");
+                    bail!(
+                        "Credential file permissions are too open; run chmod 600 on ~/.ri/credentials.json"
+                    );
                 }
             }
         }
     }
     let source = fs::read_to_string(path).context("Reading saved credentials")?;
-    let credentials: Credentials = serde_json::from_str(&source).map_err(|_| anyhow::anyhow!("Invalid credentials.json format; run 'ri login' again"))?;
+    let credentials: Credentials = serde_json::from_str(&source)
+        .map_err(|_| anyhow::anyhow!("Invalid credentials.json format; run 'ri login' again"))?;
     Ok(Some(api_key(credentials.openrouter.api_key)?))
 }
 
@@ -54,9 +68,12 @@ pub fn resolve(base_url: &str) -> Result<ApiKey> {
         Err(env::VarError::NotUnicode(_)) => bail!("OPENROUTER_API_KEY is not valid Unicode"),
         Err(env::VarError::NotPresent) => {}
     }
-    let key = load(&default_path()?)?.context("No OpenRouter credentials found. Run 'ri login' or set OPENROUTER_API_KEY")?;
+    let key = load(&default_path()?)?
+        .context("No OpenRouter credentials found. Run 'ri login' or set OPENROUTER_API_KEY")?;
     if base_url.trim_end_matches('/') != crate::openrouter::DEFAULT_BASE_URL {
-        bail!("Saved credentials can only be sent to the official OpenRouter API. For a custom endpoint, explicitly set OPENROUTER_API_KEY");
+        bail!(
+            "Saved credentials can only be sent to the official OpenRouter API. For a custom endpoint, explicitly set OPENROUTER_API_KEY"
+        );
     }
     Ok(key)
 }
@@ -71,21 +88,35 @@ pub fn save(path: &Path, key: &ApiKey) -> Result<()> {
         use std::os::unix::fs::DirBuilderExt;
         directory.mode(0o700);
     }
-    directory.create(parent).context("Creating credential directory")?;
+    directory
+        .create(parent)
+        .context("Creating credential directory")?;
     if let Ok(metadata) = fs::symlink_metadata(path)
         && (!metadata.is_file() || metadata.file_type().is_symlink())
-    { bail!("Refusing to replace a non-regular credential file"); }
-    let mut temporary = tempfile::NamedTempFile::new_in(parent).context("Creating private credential file")?;
+    {
+        bail!("Refusing to replace a non-regular credential file");
+    }
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(parent).context("Creating private credential file")?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        temporary.as_file().set_permissions(fs::Permissions::from_mode(0o600))?;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))?;
     }
-    let credentials = Credentials { openrouter:StoredKey { api_key:key.expose_secret().to_owned() } };
+    let credentials = Credentials {
+        openrouter: StoredKey {
+            api_key: key.expose_secret().to_owned(),
+        },
+    };
     let data = serde_json::to_vec(&credentials).context("Serializing credentials")?;
     temporary.write_all(&data)?;
     temporary.as_file().sync_all()?;
-    temporary.persist(path).map_err(|error| error.error).context("Saving credentials")?;
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .context("Saving credentials")?;
     Ok(())
 }
 
@@ -98,11 +129,14 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join(".ri/credentials.json");
         assert!(load(&path)?.is_none());
-        let key = api_key("mock-secret-one".into())?;
+        let key = api_key("mock-secret-one")?;
         assert!(!format!("{key:?}").contains("mock-secret"));
         save(&path, &key)?;
-        save(&path, &api_key("mock-secret-two".into())?)?;
-        assert_eq!(load(&path)?.context("Missing saved key")?.expose_secret(), "mock-secret-two");
+        save(&path, &api_key("mock-secret-two")?)?;
+        assert_eq!(
+            load(&path)?.context("Missing saved key")?.expose_secret(),
+            "mock-secret-two"
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -113,10 +147,12 @@ mod tests {
 
     #[test]
     fn rejects_invalid_keys_and_malformed_storage() -> Result<()> {
-        for value in ["", "  ", "key with spaces", "key\nother"] { assert!(api_key(value.into()).is_err()); }
+        for value in ["", "  ", "key with spaces", "key\nother"] {
+            assert!(api_key(value).is_err());
+        }
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("credentials.json");
-        save(&path, &api_key("mock".into())?)?;
+        save(&path, &api_key("mock")?)?;
         fs::write(&path, "not-json-containing-a-secret")?;
         let error = load(&path).err().context("Expected an error")?;
         assert!(!format!("{error:#}").contains("containing-a-secret"));

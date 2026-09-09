@@ -1,10 +1,10 @@
 //! Provider-neutral chat and model discovery boundary.
 pub use crate::config::ReasoningEffort;
+pub use crate::message::Message as ChatMessage;
+pub use crate::response::{Message as Completion, ToolCall, ToolCallFunction};
 use anyhow::Result;
 use serde::{Deserialize, Deserializer};
 use std::{future::Future, pin::Pin};
-pub use crate::message::Message as ChatMessage;
-pub use crate::response::{Message as Completion, ToolCall, ToolCallFunction};
 
 pub type ProviderFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 

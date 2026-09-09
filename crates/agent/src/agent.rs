@@ -117,7 +117,11 @@ impl Session {
             .context("Session persistence is disabled")?;
         let mut saved = store.load(id.to_owned()).await?;
         if saved.provider != self.provider.id() {
-            bail!("Session belongs to provider '{}', not '{}'", saved.provider, self.provider.id());
+            bail!(
+                "Session belongs to provider '{}', not '{}'",
+                saved.provider,
+                self.provider.id()
+            );
         }
         if saved.interrupted {
             saved.messages.truncate(saved.stable_len);
@@ -193,12 +197,18 @@ impl Session {
                 turn + 1,
                 self.config.max_turns
             )));
-            let response = self.provider.complete(CompletionRequest {
-                messages: &self.messages,
-                model: &self.config.model,
-                tools: &definitions,
-                reasoning_effort: self.config.reasoning_effort,
-            }).await.with_context(|| format!("Failed to request {} model response", self.provider.name()))?;
+            let response = self
+                .provider
+                .complete(CompletionRequest {
+                    messages: &self.messages,
+                    model: &self.config.model,
+                    tools: &definitions,
+                    reasoning_effort: self.config.reasoning_effort,
+                })
+                .await
+                .with_context(|| {
+                    format!("Failed to request {} model response", self.provider.name())
+                })?;
             let outcome = ResponseProcessor::new(response)
                 .with_limits(self.config.limits)
                 .with_runtime(self.output.clone(), Arc::clone(&self.config.lua))
