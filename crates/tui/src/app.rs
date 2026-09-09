@@ -17,7 +17,7 @@ use ri_agent::{
     agent::{Selection, Session},
     events::Event,
     find_files,
-    openrouter::{Model, ReasoningEffort},
+    providers::{Model, ReasoningEffort},
 };
 use std::collections::VecDeque;
 use tokio::sync::mpsc;
@@ -903,7 +903,7 @@ mod tests {
 
     fn app() -> Result<App> {
         let session = Session::new(
-            std::sync::Arc::new(ri_agent::openrouter::OpenRouter::new(
+            std::sync::Arc::new(ri_agent::providers::openrouter::OpenRouter::new(
                 "http://localhost",
                 ri_agent::credentials::api_key("mock")?,
             )?),

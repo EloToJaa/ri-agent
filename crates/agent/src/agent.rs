@@ -3,7 +3,7 @@ use crate::{
     events::{Event, Output},
     limits::Limits,
     message::Message,
-    provider::{CompletionRequest, Provider},
+    providers::{CompletionRequest, Provider},
     response_processor::{ResponseProcessor, TurnOutcome},
     sessions::{SavedSession, SessionStore},
     tools,
@@ -260,7 +260,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{Completion, Model, ProviderFuture};
+    use crate::providers::{Completion, Model, ProviderFuture};
 
     struct MockProvider(&'static str);
     impl Provider for MockProvider {

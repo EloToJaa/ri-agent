@@ -2,8 +2,8 @@ use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngCore;
 use ri_agent::{
-    codex,
     credentials::{self, CodexCredentials},
+    providers::codex,
 };
 use secrecy::SecretString;
 use serde::Deserialize;

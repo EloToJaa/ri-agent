@@ -1,4 +1,6 @@
-//! Provider-neutral chat and model discovery boundary.
+//! Provider-neutral chat and model discovery boundary and provider implementations.
+pub mod codex;
+pub mod openrouter;
 pub use crate::config::ReasoningEffort;
 pub use crate::message::Message as ChatMessage;
 pub use crate::response::{Message as Completion, ToolCall, ToolCallFunction};
@@ -8,7 +10,8 @@ use std::{future::Future, pin::Pin};
 
 /// Connect using environment/saved credentials, preserving the configured `OpenRouter` endpoint.
 pub fn connect(id: &str, openrouter_base_url: &str) -> Result<std::sync::Arc<dyn Provider>> {
-    use crate::{codex::Codex, credentials, openrouter::OpenRouter};
+    use self::{codex::Codex, openrouter::OpenRouter};
+    use crate::credentials;
     match id {
         "openrouter" => Ok(std::sync::Arc::new(OpenRouter::new(
             openrouter_base_url,
@@ -19,7 +22,7 @@ pub fn connect(id: &str, openrouter_base_url: &str) -> Result<std::sync::Arc<dyn
                 "No OpenAI Codex credentials found. Run 'ri login --provider openai-codex'",
             )?;
             Ok(std::sync::Arc::new(Codex::new(
-                crate::codex::DEFAULT_BASE_URL,
+                codex::DEFAULT_BASE_URL,
                 auth,
             )?))
         }

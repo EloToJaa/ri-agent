@@ -92,7 +92,7 @@ pub fn resolve(base_url: &str) -> Result<ApiKey> {
     }
     let key = load(&default_path()?)?
         .context("No OpenRouter credentials found. Run 'ri login' or set OPENROUTER_API_KEY")?;
-    if base_url.trim_end_matches('/') != crate::openrouter::DEFAULT_BASE_URL {
+    if base_url.trim_end_matches('/') != crate::providers::openrouter::DEFAULT_BASE_URL {
         bail!(
             "Saved credentials can only be sent to the official OpenRouter API. For a custom endpoint, explicitly set OPENROUTER_API_KEY"
         );

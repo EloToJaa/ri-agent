@@ -48,7 +48,7 @@ pub fn parse(input: &str) -> Result<SlashCommand> {
         "/model" => Ok(SlashCommand::Model(argument)),
         "/provider" => {
             if let Some(id) = &argument {
-                ri_agent::provider::default_model(id)?;
+                ri_agent::providers::default_model(id)?;
             }
             Ok(SlashCommand::Provider(argument))
         }

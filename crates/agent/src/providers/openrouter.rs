@@ -1,9 +1,9 @@
 //! `OpenRouter` implementation of the provider boundary and authentication API.
 pub use crate::config::ReasoningEffort;
-pub use crate::provider::{Model, ReasoningCapabilities, SupportedEfforts};
+pub use crate::providers::{Model, ReasoningCapabilities, SupportedEfforts};
 use crate::{
     credentials::ApiKey,
-    provider::{Completion, CompletionRequest, Provider, ProviderFuture},
+    providers::{Completion, CompletionRequest, Provider, ProviderFuture},
     response::Response,
 };
 use anyhow::{Context, Result, bail};
@@ -156,7 +156,7 @@ impl Provider for OpenRouter {
             }
             #[derive(Serialize)]
             struct ChatRequest<'a> {
-                messages: &'a [crate::provider::ChatMessage],
+                messages: &'a [crate::providers::ChatMessage],
                 model: &'a str,
                 tools: &'a [serde_json::Value],
                 #[serde(skip_serializing_if = "Option::is_none")]

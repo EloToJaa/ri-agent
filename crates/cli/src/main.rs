@@ -4,7 +4,8 @@ use ri_agent::{
     agent::{AgentConfig, Session},
     config::{LuaConfig, ReasoningEffort},
     events::Output,
-    limits, openrouter,
+    limits,
+    providers::{self, openrouter},
     sessions::SessionStore,
 };
 mod login;
@@ -126,10 +127,10 @@ async fn main() -> Result<()> {
         .base_url
         .or_else(|| settings.base_url.clone())
         .unwrap_or_else(|| openrouter::DEFAULT_BASE_URL.into());
-    let provider = ri_agent::provider::connect(&args.provider, &base_url)?;
+    let provider = providers::connect(&args.provider, &base_url)?;
     let model = match args.model.or_else(|| settings.model.clone()) {
         Some(model) => model,
-        None => ri_agent::provider::initial_model(provider.as_ref()).await?,
+        None => providers::initial_model(provider.as_ref()).await?,
     };
     let config = AgentConfig {
         model,

@@ -1,4 +1,4 @@
-use crate::{message::Message, provider::Completion, tools};
+use crate::{message::Message, providers::Completion, tools};
 use anyhow::Result;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 

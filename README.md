@@ -165,13 +165,13 @@ crates/cli/    ri-agent-cli   CLI configuration and interface selection
 
 ## Providers
 
-The library exposes the `Provider` trait in `crates/agent/src/provider.rs`. `OpenRouter` and `OpenAI Codex` implement model discovery, reasoning capabilities, and completions. Codex uses ChatGPT OAuth credentials only. Providers own their transport and error translation; sessions depend only on the trait. No non-OpenRouter endpoint is accepted unless an explicit `OPENROUTER_API_KEY` is provided for testing.
+The library exposes the `Provider` trait in `crates/agent/src/providers/mod.rs`. `OpenRouter` and `OpenAI Codex` implement model discovery, reasoning capabilities, and completions. Codex uses ChatGPT OAuth credentials only. Provider implementations live in `crates/agent/src/providers/` (`openrouter.rs` and `codex.rs`). They own their transport and error translation; sessions depend only on the trait. The canonical library namespace is `ri_agent::providers`; the original `ri_agent::provider`, `ri_agent::openrouter`, and `ri_agent::codex` paths remain compatibility re-exports. No non-OpenRouter endpoint is accepted unless an explicit `OPENROUTER_API_KEY` is provided for testing.
 
 ## Authentication security
 
 Browser login uses S256 PKCE with a random verifier, a random localhost port, a single-use callback, and no API key in the browser URL. The callback listener is bound to loopback and has a 120-second read timeout. `ri login --api-key` uses a hidden terminal prompt and validates the key before saving. Login errors avoid echoing keys or authorization codes. If a browser cannot open, the URL is printed for manual opening.
 
-The root Cargo manifest is workspace-only. `crates/agent/src/openrouter.rs` handles OpenRouter catalog capabilities; `crates/agent/src/sessions.rs` handles SQLite persistence.
+The root Cargo manifest is workspace-only. `crates/agent/src/providers/openrouter.rs` handles OpenRouter catalog capabilities; `crates/agent/src/sessions.rs` handles SQLite persistence.
 
 The main library re-exports the Lua crate as `ri_agent::config`. Frontends use `Session` and an event channel (`Output::channel`); `Output::default` writes CLI output. Sessions own conversation history and expose `submit` and `clear`.
 

@@ -8,6 +8,7 @@ This repository implements an asynchronous Rust agent harness using an OpenRoute
 - `crates/tui/src/lib.rs` owns Ratatui rendering and terminal input.
 - `crates/lua/src/lib.rs` loads trusted user configuration and runs hooks/custom tools.
 - `crates/agent/src/lib.rs` exposes sessions, events, limits, and Lua configuration.
+- `crates/agent/src/providers/` contains the shared provider interface in `mod.rs` and the OpenRouter/Codex implementations.
 - `crates/agent/src/agent.rs` manages the conversation loop; `message.rs`, `response.rs`, and `response_processor.rs` define and process protocol data.
 - `crates/agent/src/tools/` contains the `Tool` trait, shared registry, and Read, Write, and Bash implementations. Register new tools in `TOOLS` so definitions and execution stay aligned.
 - `crates/agent/src/limits.rs` centralizes execution limits.

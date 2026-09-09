@@ -1,7 +1,7 @@
 //! `OpenAI Codex` provider using `ChatGPT` OAuth credentials.
 use crate::{
     credentials::CodexCredentials,
-    provider::{
+    providers::{
         Completion, CompletionRequest, Model, Provider, ProviderFuture, ReasoningCapabilities,
         SupportedEfforts,
     },
@@ -136,12 +136,12 @@ impl Provider for Codex {
     fn complete<'a>(&'a self, request: CompletionRequest<'a>) -> ProviderFuture<'a, Completion> {
         Box::pin(async move {
             let input = request.messages.iter().flat_map(|message| match message {
-                crate::provider::ChatMessage::User { content } => vec![json!({"type":"message","role":"user","content":[{"type":"input_text","text":content}]})],
-                crate::provider::ChatMessage::Assistant { content, tool_calls, .. } => {
+                crate::providers::ChatMessage::User { content } => vec![json!({"type":"message","role":"user","content":[{"type":"input_text","text":content}]})],
+                crate::providers::ChatMessage::Assistant { content, tool_calls, .. } => {
                     let mut items = content.as_ref().map_or_else(Vec::new, |text| vec![json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]})]);
                     items.extend(tool_calls.iter().map(|call| json!({"type":"function_call","call_id":call.id,"name":call.function.name,"arguments":call.function.arguments.as_deref().unwrap_or("{}") }))); items
                 }
-                crate::provider::ChatMessage::Tool { content, tool_call_id } => vec![json!({"type":"function_call_output","call_id":tool_call_id,"output":content})],
+                crate::providers::ChatMessage::Tool { content, tool_call_id } => vec![json!({"type":"function_call_output","call_id":tool_call_id,"output":content})],
             }).collect::<Vec<_>>();
             let tools = request
                 .tools
@@ -253,7 +253,7 @@ fn parse_response(value: &Value) -> Result<Completion> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::ReasoningEffort;
+    use crate::providers::ReasoningEffort;
 
     #[test]
     fn catalog_request_includes_client_version() -> Result<()> {
@@ -271,7 +271,7 @@ mod tests {
     #[test]
     fn maps_codex_catalog_reasoning_levels_and_default() -> Result<()> {
         let models = catalog_models(serde_json::from_str(include_str!(
-            "../tests/fixtures/codex_models.json"
+            "../../tests/fixtures/codex_models.json"
         ))?)?;
         let model = models.first().context("Missing model")?;
         assert_eq!(

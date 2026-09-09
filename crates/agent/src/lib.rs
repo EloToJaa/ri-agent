@@ -1,10 +1,11 @@
 pub mod agent;
-pub mod codex;
 pub mod credentials;
 pub mod events;
 pub mod limits;
-pub mod openrouter;
-pub mod provider;
+pub mod providers;
+// Preserve the original public paths for downstream library users.
+pub use providers as provider;
+pub use providers::{codex, openrouter};
 pub mod sessions;
 pub use ri_agent_lua as config;
 mod message;

@@ -13,7 +13,7 @@ use futures_util::StreamExt;
 use ri_agent::{
     agent::{Selection, Session},
     events::{Event, Output},
-    provider::{self, Provider},
+    providers::{self, Provider},
     sessions::SessionSummary,
 };
 use std::io::{self, IsTerminal};
@@ -56,8 +56,8 @@ async fn execute(command: Command, session: &mut Session, base_url: &str) -> Res
         Command::Select(selection) => session.select(selection).await?,
         Command::Provider(id) => {
             if id != session.provider().id() {
-                let provider = provider::connect(&id, base_url)?;
-                let model = provider::initial_model(provider.as_ref()).await?;
+                let provider = providers::connect(&id, base_url)?;
+                let model = providers::initial_model(provider.as_ref()).await?;
                 session.switch_provider(provider, model).await?;
                 return Ok(Outcome::ProviderChanged {
                     id: session.id().to_owned(),
@@ -115,7 +115,7 @@ pub async fn run(session: Session, prompt: Option<String>, interrupted: bool) ->
         session,
         prompt,
         interrupted,
-        ri_agent::openrouter::DEFAULT_BASE_URL,
+        ri_agent::providers::openrouter::DEFAULT_BASE_URL,
     )
     .await
 }

@@ -3,7 +3,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngCore;
 use ri_agent::{
     credentials,
-    openrouter::{self, OpenRouter},
+    providers::openrouter::{self, OpenRouter},
 };
 use sha2::{Digest, Sha256};
 use std::{
