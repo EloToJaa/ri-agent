@@ -11,6 +11,23 @@ pub enum SlashCommand {
     Help,
 }
 
+const COMMANDS: [&str; 5] = ["/model", "/reasoning", "/resume", "/login", "/help"];
+
+pub fn suggestions(input: &str) -> Vec<&'static str> {
+    let prefix = input.split_whitespace().next().unwrap_or_default();
+    COMMANDS
+        .iter()
+        .copied()
+        .filter(|command| command.starts_with(prefix))
+        .collect()
+}
+
+pub fn complete(input: &str) -> Option<String> {
+    suggestions(input)
+        .first()
+        .map(|command| format!("{command} "))
+}
+
 pub fn parse(input: &str) -> Result<SlashCommand> {
     let mut parts = input.split_whitespace();
     let command = parts.next().unwrap_or_default();
@@ -35,6 +52,17 @@ pub fn parse(input: &str) -> Result<SlashCommand> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completes_commands_as_the_slash_prefix_is_typed() {
+        assert_eq!(
+            suggestions("/"),
+            vec!["/model", "/reasoning", "/resume", "/login", "/help"]
+        );
+        assert_eq!(suggestions("/rea"), vec!["/reasoning"]);
+        assert_eq!(complete("/mod").as_deref(), Some("/model "));
+        assert!(complete("/unknown").is_none());
+    }
 
     #[test]
     fn parses_commands_and_rejects_ambiguous_input() -> Result<()> {

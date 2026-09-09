@@ -7,10 +7,10 @@ use anyhow::{Context, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Style, Stylize},
     text::Line,
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
 use ri_agent::{
     agent::{Selection, Session},
@@ -361,6 +361,11 @@ impl App {
                 self.send(commands, Command::ListSessions)?;
             }
             KeyCode::Enter => self.enter(commands)?,
+            KeyCode::Tab if self.input.trim_start().starts_with('/') => {
+                if let Some(completion) = commands::complete(self.input.trim_start()) {
+                    self.input = completion;
+                }
+            }
             KeyCode::Backspace => {
                 if let Some((index, _)) = self.input.grapheme_indices(true).next_back() {
                     self.input.truncate(index);
@@ -502,7 +507,39 @@ impl App {
         );
         if let Some(picker) = &self.picker {
             picker.draw(frame);
+        } else {
+            self.draw_command_completion(frame, input);
         }
+    }
+
+    fn draw_command_completion(&self, frame: &mut Frame, input: Rect) {
+        if !self.input.trim_start().starts_with('/') || self.input.chars().any(char::is_whitespace)
+        {
+            return;
+        }
+        let suggestions = commands::suggestions(self.input.trim_start());
+        if suggestions.is_empty() {
+            return;
+        }
+        let height = u16::try_from(suggestions.len())
+            .unwrap_or(u16::MAX)
+            .saturating_add(2);
+        let popup = Rect {
+            x: input.x,
+            y: input.y.saturating_sub(height),
+            width: input.width.min(32),
+            height,
+        };
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(suggestions.join("\n")).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Commands · Tab completes ")
+                    .border_style(Style::default().fg(Color::Cyan)),
+            ),
+            popup,
+        );
     }
 }
 
