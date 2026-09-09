@@ -8,7 +8,7 @@ pub enum SlashCommand {
     Provider(Option<String>),
     Reasoning(Option<ReasoningEffort>),
     Resume(Option<String>),
-    Login,
+    Login { manual: bool },
     Help,
 }
 
@@ -58,7 +58,11 @@ pub fn parse(input: &str) -> Result<SlashCommand> {
                 .transpose()?,
         )),
         "/resume" => Ok(SlashCommand::Resume(argument)),
-        "/login" => Ok(SlashCommand::Login),
+        "/login" => match argument.as_deref() {
+            None => Ok(SlashCommand::Login { manual: false }),
+            Some("--manual") => Ok(SlashCommand::Login { manual: true }),
+            _ => bail!("Usage: /login [--manual]"),
+        },
         "/help" => Ok(SlashCommand::Help),
         _ => bail!("Unknown command '{command}'. Use /help for available commands"),
     }
@@ -89,6 +93,12 @@ mod tests {
 
     #[test]
     fn parses_commands_and_rejects_ambiguous_input() -> Result<()> {
+        assert_eq!(parse("/login")?, SlashCommand::Login { manual: false });
+        assert_eq!(
+            parse("/login --manual")?,
+            SlashCommand::Login { manual: true }
+        );
+        assert!(parse("/login --unknown").is_err());
         assert_eq!(parse("/provider")?, SlashCommand::Provider(None));
         assert_eq!(
             parse("/provider openai-codex")?,

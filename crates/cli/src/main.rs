@@ -93,8 +93,10 @@ async fn main() -> Result<()> {
     {
         return match provider.as_str() {
             "openrouter" => login::run(api_key, manual).await,
-            "openai-codex" if !api_key && !manual => Box::pin(openai_login::run()).await,
-            "openai-codex" => bail!("OpenAI Codex login does not support --api-key or --manual"),
+            "openai-codex" if !api_key => Box::pin(openai_login::run(manual)).await,
+            "openai-codex" => bail!(
+                "OpenAI Codex login does not support --api-key; use browser login or --manual"
+            ),
             _ => bail!("Unknown provider '{provider}'; expected openrouter or openai-codex"),
         };
     }
@@ -233,6 +235,11 @@ mod tests {
             "--reasoning",
             "high",
         ])?;
+        let login =
+            Args::try_parse_from(["ri", "login", "--provider", "openai-codex", "--manual"])?;
+        assert!(
+            matches!(login.command, Some(Command::Login { provider, manual: true, api_key: false }) if provider == "openai-codex")
+        );
         assert_eq!(args.model.as_deref(), Some("test"));
         assert_eq!(args.max_turns.map(NonZeroUsize::get), Some(3));
         assert_eq!(args.reasoning, Some(ReasoningEffort::High));

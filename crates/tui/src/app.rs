@@ -143,7 +143,7 @@ impl App {
         self.busy = false;
         self.status = "Ready".into();
         match result {
-            Ok(Outcome::LoginRequested) => {
+            Ok(Outcome::LoginRequested { .. }) => {
                 self.busy = true;
                 self.status = "Logging in…".into();
             }
@@ -355,10 +355,10 @@ impl App {
                     );
                 }
             }
-            SlashCommand::Login => self.send(commands, Command::Login)?,
+            SlashCommand::Login { manual } => self.send(commands, Command::Login { manual })?,
             SlashCommand::Help => self.append(
                 "COMMANDS",
-                "/provider [openrouter|openai-codex] (new conversation) · /model [query] · /reasoning [effort] · /resume [id] · /login · /help\n$skill-name invokes an installed skill; type $ then Tab to complete. @ selects a file.",
+                "/provider [openrouter|openai-codex] (new conversation) · /model [query] · /reasoning [effort] · /resume [id] · /login [--manual] · /help\n$skill-name invokes an installed skill; type $ then Tab to complete. @ selects a file.",
                 Color::Cyan,
             ),
         }
@@ -1086,13 +1086,27 @@ mod tests {
     }
 
     #[test]
+    fn manual_login_command_passes_the_flag_to_the_worker() -> Result<()> {
+        let mut app = app()?;
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        app.input = "/login --manual".into();
+        app.enter(&sender)?;
+        assert!(matches!(
+            receiver.try_recv()?,
+            Command::Login { manual: true }
+        ));
+        assert!(app.busy);
+        Ok(())
+    }
+
+    #[test]
     fn login_results_preserve_conversation_selection_and_draft() -> Result<()> {
         let mut app = app()?;
         app.input = "Next task".into();
         app.append("YOU", "Previous prompt", Color::Cyan);
         let id = app.id.clone();
         let selection = app.selection.clone();
-        app.finish(Ok(Outcome::LoginRequested));
+        app.finish(Ok(Outcome::LoginRequested { manual: false }));
         assert!(app.busy);
         app.finish(Err("Login cancelled".into()));
         assert!(!app.busy);

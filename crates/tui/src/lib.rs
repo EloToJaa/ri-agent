@@ -26,11 +26,13 @@ pub(crate) enum Command {
     Resume(String),
     ListSessions,
     Clear,
-    Login,
+    Login { manual: bool },
 }
 
 enum Outcome {
-    LoginRequested,
+    LoginRequested {
+        manual: bool,
+    },
     ProviderChanged {
         id: String,
         selection: Selection,
@@ -85,7 +87,7 @@ async fn execute(command: Command, session: &mut Session, base_url: &str) -> Res
             ));
         }
         // Only the frontend can safely hand ownership of its terminal to login.
-        Command::Login => return Ok(Outcome::LoginRequested),
+        Command::Login { manual } => return Ok(Outcome::LoginRequested { manual }),
         Command::Clear => {
             session.clear();
             return Ok(Outcome::Loaded {
@@ -181,12 +183,12 @@ pub async fn run_with_base_url(
                 result = completed.recv() => {
                     while let Ok(event) = events.try_recv() { app.event(event); }
                     let result = match result.context("Agent worker stopped")? {
-                        Ok(Outcome::LoginRequested) => {
-                            app.finish(Ok(Outcome::LoginRequested));
+                        Ok(Outcome::LoginRequested { manual }) => {
+                            app.finish(Ok(Outcome::LoginRequested { manual }));
                             // Stop the event reader before the child inherits stdin. No TUI
                             // input or drawing happens until the terminal has been restored.
                             drop(input);
-                            let result = login::run(&mut terminal, provider.id()).await?;
+                            let result = login::run(&mut terminal, provider.id(), manual).await?;
                             input = EventStream::new();
                             result.map(|()| Outcome::Notice(format!(
                                 "{} login saved. Restart ri to use the new credential.", provider.name()

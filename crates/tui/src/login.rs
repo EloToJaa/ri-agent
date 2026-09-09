@@ -8,7 +8,11 @@ use crossterm::{
 use std::{future::Future, io, process::Stdio};
 
 /// The outer result reports restoration failure; the inner result is the login outcome.
-pub async fn run(terminal: &mut ratatui::DefaultTerminal, provider: &str) -> Result<Result<()>> {
+pub async fn run(
+    terminal: &mut ratatui::DefaultTerminal,
+    provider: &str,
+    manual: bool,
+) -> Result<Result<()>> {
     // Poll once to install the SIGINT handler before leaving raw mode. Otherwise Ctrl+C
     // reaches both foreground processes and could terminate ri before it can restore the TUI.
     let interrupt = tokio::signal::ctrl_c();
@@ -32,6 +36,9 @@ pub async fn run(terminal: &mut ratatui::DefaultTerminal, provider: &str) -> Res
                 std::env::current_exe().context("Finding ri executable")?,
             );
             command.arg("login").arg("--provider").arg(provider);
+            if manual {
+                command.arg("--manual");
+            }
             run_command(command, interrupt).await
         },
         || {
