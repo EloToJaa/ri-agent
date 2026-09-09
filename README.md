@@ -40,7 +40,7 @@ The TUI keeps conversation history across prompts and shows assistant responses,
 - **F2**: search OpenRouter’s live catalog of tool-capable models. Switching models resets the reasoning override and removes old model-specific reasoning metadata, but preserves conversation text and tool results.
 - **F3**: select reasoning effort or **Provider default**. Choices follow the selected model’s `reasoning.supported_efforts`; mandatory reasoning models never offer `none`. Missing capability metadata only offers provider defaults.
 - **F4**: search and resume saved sessions for this working directory.
-- **Slash commands**: `/model [query]`, `/reasoning [effort]`, `/resume [id]`, `/login`, and `/help`. Commands can be typed or pasted into the prompt; `/model`, `/reasoning`, and `/resume` with no argument open their pickers. `/login` prints the safe restart instructions because provider credentials are fixed when a session starts.
+- **Slash commands**: `/model [query]`, `/reasoning [effort]`, `/resume [id]`, `/login`, and `/help`. Commands can be typed or pasted into the prompt; `/model`, `/reasoning`, and `/resume` with no argument open their pickers. `/login` runs the `ri login` flow from the TUI and saves the credential; restart the TUI afterward because provider credentials are fixed when a session starts.
 - **F5**: refresh the catalog after a network error. The configured model still works without a catalog when using provider-default reasoning.
 - **Enter**: send a prompt when idle. You can draft the next prompt while the agent works. Model, reasoning, and session changes are only available when idle.
 - **Backspace**: delete the last character/grapheme.

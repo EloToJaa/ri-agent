@@ -24,6 +24,7 @@ pub(crate) enum Command {
     Resume(String),
     ListSessions,
     Clear,
+    Login,
 }
 
 enum Outcome {
@@ -38,6 +39,7 @@ enum Outcome {
         interrupted: bool,
     },
     Sessions(Vec<SessionSummary>),
+    Notice(String),
 }
 
 async fn execute(command: Command, session: &mut Session) -> Result<Outcome> {
@@ -60,6 +62,23 @@ async fn execute(command: Command, session: &mut Session) -> Result<Outcome> {
                     .context("Session persistence is disabled")?
                     .list()
                     .await?,
+            ));
+        }
+        Command::Login => {
+            let status = std::process::Command::new(
+                std::env::current_exe().context("Finding ri executable")?,
+            )
+            .arg("login")
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status()
+            .context("Running ri login")?;
+            if !status.success() {
+                bail!("ri login exited with {status}");
+            }
+            return Ok(Outcome::Notice(
+                "OpenRouter login saved. Restart ri to use the new credential.".into(),
             ));
         }
         Command::Clear => {

@@ -126,6 +126,7 @@ impl App {
                 }
                 self.status = "Session restored".into();
             }
+            Ok(Outcome::Notice(text)) => self.append("LOGIN", &text, Color::Yellow),
             Ok(Outcome::Sessions(sessions)) => {
                 let items = sessions
                     .into_iter()
@@ -183,6 +184,9 @@ impl App {
     }
 
     pub fn enter(&mut self, commands: &mpsc::UnboundedSender<Command>) -> Result<()> {
+        if self.busy {
+            return Ok(());
+        }
         if self.input.trim_start().starts_with('/') {
             let input = std::mem::take(&mut self.input);
             if let Err(error) = self.slash_command(&input, commands) {
@@ -200,26 +204,60 @@ impl App {
     ) -> Result<()> {
         match commands::parse(input)? {
             SlashCommand::Model(Some(query)) => {
-                let model = self.models.iter().find(|model| model.id == query || model.id.contains(&query)).map(|model| model.id.clone());
-                let Some(model) = model else { self.append("MODEL", "No matching OpenRouter model; use /model to search.", Color::Yellow); return Ok(()) };
-                self.send(commands, Command::Select(Selection { model, reasoning_effort: None }))?;
+                let model = self
+                    .models
+                    .iter()
+                    .find(|model| model.id == query || model.id.contains(&query))
+                    .map(|model| model.id.clone());
+                let Some(model) = model else {
+                    self.append(
+                        "MODEL",
+                        "No matching OpenRouter model; use /model to search.",
+                        Color::Yellow,
+                    );
+                    return Ok(());
+                };
+                self.send(
+                    commands,
+                    Command::Select(Selection {
+                        model,
+                        reasoning_effort: None,
+                    }),
+                )?;
             }
             SlashCommand::Model(None) => self.open_picker(Kind::Model),
             SlashCommand::Reasoning(Some(effort)) => {
                 if !self.available_efforts().contains(&effort) {
                     self.append("REASONING", "That effort is not advertised for the selected model. Use /reasoning to inspect supported levels.", Color::Yellow);
-                    return Ok(())
+                    return Ok(());
                 }
-                self.send(commands, Command::Select(Selection { model: self.selection.model.clone(), reasoning_effort: Some(effort) }))?;
+                self.send(
+                    commands,
+                    Command::Select(Selection {
+                        model: self.selection.model.clone(),
+                        reasoning_effort: Some(effort),
+                    }),
+                )?;
             }
             SlashCommand::Reasoning(None) => self.open_picker(Kind::Reasoning),
             SlashCommand::Resume(Some(id)) => self.send(commands, Command::Resume(id))?,
             SlashCommand::Resume(None) => {
-                if self.persistence { self.send(commands, Command::ListSessions)?; }
-                else { self.append("SESSION", "Persistence is disabled; restart without --no-save to resume sessions.", Color::Yellow); }
+                if self.persistence {
+                    self.send(commands, Command::ListSessions)?;
+                } else {
+                    self.append(
+                        "SESSION",
+                        "Persistence is disabled; restart without --no-save to resume sessions.",
+                        Color::Yellow,
+                    );
+                }
             }
-            SlashCommand::Login => self.append("LOGIN", "Run `ri login` (or `ri login --manual`) in another terminal, then restart this session. The active provider credential is fixed for safety.", Color::Yellow),
-            SlashCommand::Help => self.append("COMMANDS", "/model [query] · /reasoning [effort] · /resume [id] · /login · /help", Color::Cyan),
+            SlashCommand::Login => self.send(commands, Command::Login)?,
+            SlashCommand::Help => self.append(
+                "COMMANDS",
+                "/model [query] · /reasoning [effort] · /resume [id] · /login · /help",
+                Color::Cyan,
+            ),
         }
         Ok(())
     }
