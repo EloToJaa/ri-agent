@@ -184,6 +184,49 @@ fn tool(arguments: &Value) -> Value {
 }
 
 #[test]
+fn edits_through_the_registry_before_a_following_read() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("ri-edit-{}", rand::random::<u64>()));
+    std::fs::create_dir(&root)?;
+    let path = root.join("file.txt");
+    std::fs::write(&path, "before\n")?;
+    let calls = json!({"choices": [{"message": {"tool_calls": [
+        {"id": "edit_1", "type": "function", "function": {
+            "name": "Edit", "arguments": json!({"file_path": path, "old_string": "before", "new_string": "after"}).to_string()
+        }},
+        {"id": "read_1", "type": "function", "function": {
+            "name": "Read", "arguments": json!({"file_path": path}).to_string()
+        }}
+    ]}}]});
+    let (output, requests) = run(
+        vec![
+            calls,
+            json!({"choices": [{"message": {"content": "Done"}}]}),
+        ],
+        2,
+    )?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&path)?, "after\n");
+    let diff = field(&requests, "/1/messages/2/content")?
+        .as_str()
+        .context("Missing diff")?;
+    assert!(diff.contains("-before\n+after\n"));
+    assert_eq!(field(&requests, "/1/messages/3/content")?, "after\n");
+    assert!(
+        field(&requests, "/0/tools")?
+            .as_array()
+            .context("Missing tools")?
+            .iter()
+            .any(|tool| tool.pointer("/function/name") == Some(&json!("Edit")))
+    );
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
+#[test]
 fn completes_a_tool_round_trip_and_recovers_from_errors() -> Result<()> {
     for arguments in [
         json!({"file_path": concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml")}),
@@ -318,7 +361,7 @@ async fn sqlite_resume_preserves_reasoning_tool_history_and_recovers_after_faile
     let requests = requests(handle)?;
     assert_eq!(
         field(&requests, "/0/tools")?.as_array().map(Vec::len),
-        Some(6)
+        Some(7)
     );
     assert_eq!(field(&requests, "/0/messages/0/content")?, "task: first");
     assert_eq!(field(&requests, "/0/reasoning/effort")?, "high");

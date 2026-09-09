@@ -113,10 +113,23 @@ impl App {
     fn append(&mut self, role: &str, text: &str, color: Color) {
         self.lines
             .push_back(Line::from(role.to_owned()).fg(color).bold());
+        let mut diff = false;
         for line in text.lines() {
-            self.lines.push_back(Line::from(
-                line.chars().filter(|c| !c.is_control()).collect::<String>(),
-            ));
+            let style = if diff {
+                match line.as_bytes().first() {
+                    Some(b'+') => Style::default().fg(SUCCESS),
+                    Some(b'-') => Style::default().fg(Color::Red),
+                    Some(b'@' | b'\\') => Style::default().fg(Color::DarkGray),
+                    _ => Style::default(),
+                }
+            } else {
+                Style::default()
+            };
+            diff |= role == "TOOL" && line == "File edited successfully";
+            self.lines.push_back(
+                Line::from(line.chars().filter(|c| !c.is_control()).collect::<String>())
+                    .style(style),
+            );
             while self.lines.len() > MAX_LINES {
                 self.lines.pop_front();
             }
@@ -919,6 +932,24 @@ mod tests {
         let mut app = App::new(&session, false);
         app.catalog_loading = false;
         Ok(app)
+    }
+
+    #[test]
+    fn colors_edit_diffs_in_live_and_restored_tool_results() -> Result<()> {
+        let mut app = app()?;
+        for header in ["Edit (call_1):", "call_1:"] {
+            app.lines.clear();
+            app.event(Event::Tool(format!("{header}\nFile edited successfully\n--- file\n+++ file\n@@ -1,1 +1,1 @@\n-old\n+new\n")));
+            let wrapped = app.wrapped_transcript(80);
+            for (text, color) in [("-old", Color::Red), ("+new", SUCCESS)] {
+                let line = wrapped
+                    .iter()
+                    .find(|line| line.to_string() == text)
+                    .context("Missing diff line")?;
+                assert_eq!(line.style.fg, Some(color));
+            }
+        }
+        Ok(())
     }
 
     #[test]

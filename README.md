@@ -149,6 +149,7 @@ All numeric limits must be positive. Truncation adds an `[output truncated]` mar
 
 - **Read**: read a file, subject to the output limit.
 - **Write**: create or overwrite a file; the parent directory must exist.
+- **Edit**: replace one unique exact `old_string` with `new_string` in an existing UTF-8 `file_path`. Read the file first and include surrounding text to disambiguate repeated matches. Empty, missing, ambiguous (including overlapping), and unchanged matches are rejected without writing. An empty replacement deletes the matched text. Returns a unified diff, capped by `max_output_bytes`; the TUI colors additions and deletions, including in resumed sessions. Output truncation does not truncate the file edit.
 - **Search**: search file contents with `rg`, returning matching paths, line numbers, and text. Arguments: `pattern` (regular expression), optional `path` (defaults to `.`). No matches is a normal result.
 - **Find**: discover files with `fd`. Arguments: `pattern` (filename regular expression; empty lists all files), optional `path` (defaults to `.`). Returns a JSON array of paths plus a truncation flag. Search and Find respect ignore files and skip hidden files by default; both apply `command_timeout` and `max_output_bytes` and invoke commands directly without shell interpolation.
 - **Bash**: run a command in a fresh noninteractive shell, returning stdout, stderr, and exit status. Shell state does not persist.

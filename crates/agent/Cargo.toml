@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 ri-agent-lua = { path = "../lua" }
 anyhow = "1"
+thiserror = "2"
 rusqlite = { version = "0.38", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }

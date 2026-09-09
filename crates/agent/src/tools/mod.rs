@@ -1,5 +1,6 @@
 mod bash;
 mod discovery;
+mod edit;
 pub use discovery::{FileMatches, find_files};
 mod read;
 mod write;
@@ -24,6 +25,7 @@ pub trait Tool: Sync {
 static TOOLS: &[&dyn Tool] = &[
     &read::Read,
     &write::Write,
+    &edit::Edit,
     &bash::Bash,
     &discovery::Search,
     &discovery::Find,

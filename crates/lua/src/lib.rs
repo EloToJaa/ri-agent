@@ -74,7 +74,7 @@ impl LuaConfig {
                 }
             }
         }
-        let mut names: HashSet<String> = ["Read", "Write", "Bash", "Search", "Find"]
+        let mut names: HashSet<String> = ["Read", "Write", "Edit", "Bash", "Search", "Find"]
             .map(String::from)
             .into();
         let mut definitions = Vec::new();
@@ -216,6 +216,7 @@ mod tests {
             "return {typo=true}",
             "return {hooks={unknown=function() end}}",
             "return {tools={{name='Read'}}}",
+            "return {tools={{name='Edit'}}}",
         ] {
             assert!(LuaConfig::from_source(source, "test").is_err());
         }
