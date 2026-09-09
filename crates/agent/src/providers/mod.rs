@@ -1,6 +1,7 @@
 //! Provider-neutral chat and model discovery boundary and provider implementations.
 pub mod codex;
 pub mod openrouter;
+mod sse;
 pub use crate::config::ReasoningEffort;
 pub use crate::message::Message as ChatMessage;
 pub use crate::response::{Message as Completion, ToolCall, ToolCallFunction};
@@ -59,6 +60,7 @@ pub fn default_model(id: &str) -> Result<&'static str> {
 
 pub type ProviderFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
+#[derive(Clone, Copy)]
 pub struct CompletionRequest<'a> {
     pub messages: &'a [ChatMessage],
     pub model: &'a str,
@@ -72,6 +74,15 @@ pub trait Provider: Send + Sync {
     fn name(&self) -> &'static str;
     fn models(&self) -> ProviderFuture<'_, Vec<Model>>;
     fn complete<'a>(&'a self, request: CompletionRequest<'a>) -> ProviderFuture<'a, Completion>;
+    /// Emit provisional text deltas; return the authoritative complete message.
+    /// Tools must only execute after this future succeeds.
+    fn complete_stream<'a>(
+        &'a self,
+        request: CompletionRequest<'a>,
+        _output: &'a crate::events::Output,
+    ) -> ProviderFuture<'a, Completion> {
+        self.complete(request)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

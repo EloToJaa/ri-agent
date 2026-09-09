@@ -43,12 +43,25 @@ fn read_request(stream: &mut TcpStream, method: &str) -> Result<Value> {
 }
 
 fn server(responses: Vec<(&'static str, Value)>) -> Result<Server> {
+    raw_server(
+        responses
+            .into_iter()
+            .map(|(method, body)| (method, "application/json", body.to_string()))
+            .collect(),
+        None,
+    )
+}
+
+fn raw_server(
+    responses: Vec<(&'static str, &'static str, String)>,
+    gate: Option<std::sync::mpsc::Receiver<()>>,
+) -> Result<Server> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
     let address = listener.local_addr()?;
     let server = thread::spawn(move || {
         let mut requests = Vec::new();
-        for (method, response) in responses {
+        for (method, content_type, body) in responses {
             let deadline = Instant::now() + Duration::from_secs(10);
             let (mut stream, _) = loop {
                 match listener.accept() {
@@ -61,12 +74,20 @@ fn server(responses: Vec<(&'static str, Value)>) -> Result<Server> {
                 }
             };
             requests.push(read_request(&mut stream, method)?);
-            let body = response.to_string();
             write!(
                 stream,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             )?;
+            if let Some(gate) = &gate {
+                let (first, rest) = body.split_once("\n\n").context("Missing SSE boundary")?;
+                write!(stream, "{first}\n\n")?;
+                stream.flush()?;
+                gate.recv_timeout(Duration::from_secs(5))?;
+                stream.write_all(rest.as_bytes())?;
+            } else {
+                stream.write_all(body.as_bytes())?;
+            }
         }
         Ok(requests)
     });
@@ -364,6 +385,7 @@ async fn sqlite_resume_preserves_reasoning_tool_history_and_recovers_after_faile
         Some(7)
     );
     assert_eq!(field(&requests, "/0/messages/0/content")?, "task: first");
+    assert_eq!(field(&requests, "/0/stream")?, false);
     assert_eq!(field(&requests, "/0/reasoning/effort")?, "high");
     assert_eq!(field(&requests, "/1/messages/1/reasoning")?, "thinking");
     assert_eq!(
@@ -450,5 +472,173 @@ fn uses_dot_ri_for_configuration_and_sqlite_and_validates_reasoning() -> Result<
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("hello"));
     std::fs::remove_dir_all(home)?;
+    Ok(())
+}
+
+fn sse(events: &[Value], done: bool) -> String {
+    use std::fmt::Write as _;
+    let mut body = String::new();
+    for event in events {
+        let _ = write!(body, "data: {event}\n\n");
+    }
+    if done {
+        body.push_str("data: [DONE]\n\n");
+    }
+    body
+}
+
+#[tokio::test]
+async fn receives_text_before_the_server_finishes_and_saves_only_complete_messages() -> Result<()> {
+    use ri_agent::{
+        agent::{AgentConfig, Session},
+        config::LuaConfig,
+        events::{Event, Output},
+        limits::Limits,
+        sessions::SessionStore,
+    };
+    let body = sse(
+        &[
+            json!({"choices":[{"index":0,"delta":{"content":"Hello "}}]}),
+            json!({"choices":[{"index":0,"delta":{"content":"世界"},"finish_reason":"stop"}]}),
+        ],
+        true,
+    );
+    let (release, gate) = std::sync::mpsc::channel();
+    let (address, handle) = raw_server(vec![("POST", "text/event-stream", body)], Some(gate))?;
+    let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let mut session = Session::new(
+        std::sync::Arc::new(ri_agent::openrouter::OpenRouter::new(
+            &format!("http://{address}"),
+            ri_agent::credentials::api_key("mock")?,
+        )?),
+        AgentConfig {
+            model: "mock".into(),
+            reasoning_effort: None,
+            max_turns: std::num::NonZeroUsize::MIN,
+            limits: Limits::default(),
+            lua: LuaConfig::from_source("return {}", "test")?,
+        },
+        Output::channel(sender),
+    );
+    let directory = std::env::temp_dir().join(format!("ri-stream-{}", session.id()));
+    let store = SessionStore::open(
+        directory.join("sessions.sqlite3"),
+        &std::env::current_dir()?,
+    )?;
+    session = session.with_store(store.clone());
+    let receive = async {
+        let first = tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(event) = events.recv().await {
+                if let Event::AssistantDelta(text) = event {
+                    return Some(text);
+                }
+            }
+            None
+        })
+        .await;
+        release.send(())?;
+        Ok::<_, anyhow::Error>(first?)
+    };
+    let (result, first) = tokio::join!(session.submit("hello".into()), receive);
+    assert_eq!(first?.as_deref(), Some("Hello "));
+    result?;
+    let mut completed = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let Event::Assistant(text) = event {
+            completed.push(text);
+        }
+    }
+    assert_eq!(completed, ["Hello 世界"]);
+    let id = session.id().to_owned();
+    assert!(!session.resume(&id).await?);
+    let history = session.history();
+    assert_eq!(history.len(), 2);
+    assert!(matches!(history.last(), Some(Event::Assistant(text)) if text == "Hello 世界"));
+    assert_eq!(field(&requests(handle)?, "/0/stream")?, true);
+    std::fs::remove_dir_all(directory)?;
+    Ok(())
+}
+
+#[test]
+fn cli_streams_once_and_never_executes_tools_from_an_interrupted_stream() -> Result<()> {
+    let success = sse(
+        &[
+            json!({"choices":[{"index":0,"delta":{"content":"Hello "}}]}),
+            json!({"choices":[{"index":0,"delta":{"content":"world"},"finish_reason":"stop"}]}),
+        ],
+        true,
+    );
+    let (address, handle) = raw_server(vec![("POST", "text/event-stream", success)], None)?;
+    let mut command = cli(address);
+    command.args(["--no-save", "-p", "hello"]);
+    let output = wait(command)?;
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout)?, "Hello world\n");
+    requests(handle)?;
+
+    let path = std::env::temp_dir().join(format!("ri-incomplete-{}", rand::random::<u64>()));
+    let partial = sse(
+        &[json!({"choices":[{"index":0,"delta":{
+            "content":"Editing", "tool_calls":[{"index":0,"id":"write_1","type":"function","function":{
+                "name":"Write", "arguments":json!({"file_path":path,"content":"must not be written"}).to_string()
+            }}]
+        }}]})],
+        false,
+    );
+    let (address, handle) = raw_server(vec![("POST", "text/event-stream", partial)], None)?;
+    let mut command = cli(address);
+    command.args(["--no-save", "-p", "edit"]);
+    let output = wait(command)?;
+    assert!(!output.status.success());
+    assert!(!path.exists());
+    assert!(String::from_utf8(output.stderr)?.contains("ended before its completion event"));
+    requests(handle)?;
+    Ok(())
+}
+
+#[test]
+fn executes_a_completed_streamed_tool_once_and_returns_its_result() -> Result<()> {
+    let path = std::env::temp_dir().join(format!("ri-stream-edit-{}", rand::random::<u64>()));
+    std::fs::write(&path, "old\n")?;
+    let args = json!({"file_path":path,"old_string":"old","new_string":"new"}).to_string();
+    let (first, last) = args.split_at(args.len() / 2);
+    let tool_response = sse(
+        &[
+            json!({"choices":[{"index":0,"delta":{"content":"Editing.","tool_calls":[{"index":0,"id":"edit_1","type":"function","function":{"name":"Edit","arguments":first}}]}}]}),
+            json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":last}}]},"finish_reason":"tool_calls"}]}),
+        ],
+        true,
+    );
+    let answer = sse(
+        &[json!({"choices":[{"index":0,"delta":{"content":"Done."},"finish_reason":"stop"}]})],
+        true,
+    );
+    let (address, handle) = raw_server(
+        vec![
+            ("POST", "text/event-stream", tool_response),
+            ("POST", "text/event-stream", answer),
+        ],
+        None,
+    )?;
+    let mut command = cli(address);
+    command.args(["--no-save", "-p", "edit"]);
+    let output = wait(command)?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?, "Editing.\nDone.\n");
+    assert_eq!(std::fs::read_to_string(&path)?, "new\n");
+    let requests = requests(handle)?;
+    let diff = field(&requests, "/1/messages/2/content")?
+        .as_str()
+        .context("Missing tool result")?;
+    assert!(diff.contains("-old\n+new\n"));
+    assert_eq!(
+        field(&requests, "/1/messages/1/tool_calls/0/function/arguments")?,
+        &args
+    );
+    std::fs::remove_file(path)?;
     Ok(())
 }

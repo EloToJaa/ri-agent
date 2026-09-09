@@ -179,6 +179,11 @@ pub async fn run_with_base_url(
                 }
                 event = events.recv() => {
                     app.event(event.context("Agent worker stopped")?);
+                    // Coalesce queued deltas before redrawing, while still yielding to input.
+                    for _ in 0..127 {
+                        let Ok(event) = events.try_recv() else { break; };
+                        app.event(event);
+                    }
                 }
                 result = completed.recv() => {
                     while let Ok(event) = events.try_recv() { app.event(event); }

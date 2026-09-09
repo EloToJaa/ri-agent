@@ -134,6 +134,24 @@ impl Provider for Codex {
     }
 
     fn complete<'a>(&'a self, request: CompletionRequest<'a>) -> ProviderFuture<'a, Completion> {
+        self.completion(request, None)
+    }
+
+    fn complete_stream<'a>(
+        &'a self,
+        request: CompletionRequest<'a>,
+        output: &'a crate::events::Output,
+    ) -> ProviderFuture<'a, Completion> {
+        self.completion(request, Some(output))
+    }
+}
+
+impl Codex {
+    fn completion<'a>(
+        &'a self,
+        request: CompletionRequest<'a>,
+        output: Option<&'a crate::events::Output>,
+    ) -> ProviderFuture<'a, Completion> {
         Box::pin(async move {
             let input = request.messages.iter().flat_map(|message| match message {
                 crate::providers::ChatMessage::User { content } => vec![json!({"type":"message","role":"user","content":[{"type":"input_text","text":content}]})],
@@ -163,29 +181,68 @@ impl Provider for Codex {
             {
                 object.insert("reasoning".into(), json!({"effort": effort}));
             }
-            let payload = self
+            let response = self
                 .request(self.client.post(format!("{}/responses", self.base_url)))
                 .json(&body)
                 .send()
                 .await
                 .context("Requesting OpenAI Codex completion")?
                 .error_for_status()
-                .context("OpenAI Codex completion failed")?
-                .text()
-                .await
-                .context("Reading OpenAI Codex response stream")?;
-            let completed = payload
-                .lines()
-                .filter_map(|line| line.strip_prefix("data: "))
-                .filter(|data| *data != "[DONE]")
-                .filter_map(|data| serde_json::from_str::<Value>(data).ok())
-                .find(|event| {
-                    event.get("type").and_then(Value::as_str) == Some("response.completed")
-                })
-                .and_then(|event| event.get("response").cloned())
-                .context("OpenAI Codex response stream ended without a completed response")?;
-            parse_response(&completed)
+                .context("OpenAI Codex completion failed")?;
+            let mut part = None;
+            super::sse::read(response, |data| stream_event(data, output, &mut part)).await
         })
+    }
+}
+
+fn stream_event(
+    data: &str,
+    output: Option<&crate::events::Output>,
+    part: &mut Option<(u64, u64)>,
+) -> Result<Option<Completion>> {
+    let event: Value = serde_json::from_str(data).context("Invalid OpenAI Codex stream event")?;
+    match event.get("type").and_then(Value::as_str) {
+        Some("response.output_text.delta" | "response.refusal.delta") => {
+            let text = event
+                .get("delta")
+                .and_then(Value::as_str)
+                .context("Codex text delta is missing text")?;
+            if let Some(output) = output {
+                let current = (
+                    event
+                        .get("output_index")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                    event
+                        .get("content_index")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
+                );
+                if part.is_some_and(|previous| previous != current) {
+                    output.emit(crate::events::Event::AssistantDelta("\n".into()));
+                }
+                *part = Some(current);
+                output.emit(crate::events::Event::AssistantDelta(text.to_owned()));
+            }
+            Ok(None)
+        }
+        Some("response.completed") => {
+            let response = event
+                .get("response")
+                .context("Codex completion is missing its response")?;
+            if response.get("status").and_then(Value::as_str) != Some("completed") {
+                bail!("Codex response did not complete successfully");
+            }
+            let completion = parse_response(response)?;
+            if part.is_some() && completion.content.is_none() {
+                bail!("Codex completion is missing the streamed text");
+            }
+            Ok(Some(completion))
+        }
+        Some("error" | "response.failed" | "response.incomplete") => {
+            bail!("OpenAI Codex response failed or was incomplete")
+        }
+        _ => Ok(None),
     }
 }
 
@@ -204,7 +261,11 @@ fn parse_response(value: &Value) -> Result<Completion> {
                     text.extend(
                         content
                             .iter()
-                            .filter_map(|part| part.get("text").and_then(Value::as_str))
+                            .filter_map(|part| {
+                                part.get("text")
+                                    .or_else(|| part.get("refusal"))
+                                    .and_then(Value::as_str)
+                            })
                             .map(str::to_owned),
                     );
                 }
@@ -254,6 +315,43 @@ fn parse_response(value: &Value) -> Result<Completion> {
 mod tests {
     use super::*;
     use crate::providers::ReasoningEffort;
+
+    #[test]
+    fn streams_text_parts_and_returns_only_authoritative_completed_tools() -> Result<()> {
+        use crate::events::{Event, Output};
+        let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let output = Output::channel(sender);
+        let mut part = None;
+        for (index, text) in [(0, "Hello"), (0, " world"), (1, "Next")] {
+            assert!(stream_event(&json!({"type":"response.output_text.delta", "output_index":index, "content_index":0, "delta":text}).to_string(), Some(&output), &mut part)?.is_none());
+        }
+        let mut text = String::new();
+        while let Ok(Event::AssistantDelta(delta)) = events.try_recv() {
+            text.push_str(&delta);
+        }
+        assert_eq!(text, "Hello world\nNext");
+        let response = json!({"type":"response.completed", "response":{"status":"completed", "output":[
+            {"type":"message","content":[{"type":"output_text","text":"Hello world"}]},
+            {"type":"message","content":[{"type":"output_text","text":"Next"}]},
+            {"type":"function_call","call_id":"call_1","name":"Read","arguments":"{\"file_path\":\"x\"}"}
+        ]}});
+        let complete = stream_event(&response.to_string(), Some(&output), &mut part)?
+            .context("Missing completion")?;
+        assert_eq!(complete.content.as_deref(), Some(text.as_str()));
+        assert_eq!(complete.tool_calls.len(), 1);
+        assert!(events.try_recv().is_err());
+        for data in [
+            "invalid",
+            "[DONE]",
+            r#"{"type":"response.failed"}"#,
+            r#"{"type":"response.incomplete"}"#,
+            r#"{"type":"error"}"#,
+            r#"{"type":"response.completed","response":{"status":"incomplete","output":[]}}"#,
+        ] {
+            assert!(stream_event(data, None, &mut part).is_err());
+        }
+        Ok(())
+    }
 
     #[test]
     fn catalog_request_includes_client_version() -> Result<()> {

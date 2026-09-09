@@ -32,6 +32,7 @@ pub struct LuaConfig {
     lua: Lua,
     pub settings: Settings,
     pub definitions: Vec<Value>,
+    pub has_after_response_hook: bool,
 }
 
 impl LuaConfig {
@@ -97,12 +98,18 @@ impl LuaConfig {
                 }}));
             }
         }
+        let has_after_response_hook = root
+            .get::<Option<Table>>("hooks")?
+            .map(|hooks| hooks.contains_key("after_response"))
+            .transpose()?
+            .unwrap_or(false);
         lua.set_named_registry_value("config", root)?;
         lua.set_named_registry_value("handlers", handlers)?;
         Ok(Arc::new(Self {
             lua,
             settings,
             definitions,
+            has_after_response_hook,
         }))
     }
 

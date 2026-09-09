@@ -209,6 +209,7 @@ impl Session {
         let length = self.messages.len();
         let result = self.run_turn(prompt, length).await;
         if result.is_err() {
+            self.output.emit(Event::AssistantAborted);
             self.messages.truncate(length);
         }
         self.checkpoint(false, self.messages.len()).await?;
@@ -231,18 +232,21 @@ impl Session {
                 turn + 1,
                 self.config.max_turns
             )));
-            let response = self
-                .provider
-                .complete(CompletionRequest {
-                    messages: &self.messages,
-                    model: &self.config.model,
-                    tools: &definitions,
-                    reasoning_effort: self.config.reasoning_effort,
-                })
-                .await
-                .with_context(|| {
-                    format!("Failed to request {} model response", self.provider.name())
-                })?;
+            let request = CompletionRequest {
+                messages: &self.messages,
+                model: &self.config.model,
+                tools: &definitions,
+                reasoning_effort: self.config.reasoning_effort,
+            };
+            // Hooks transform complete text. Do not display untransformed deltas.
+            let response = if self.config.lua.has_after_response_hook {
+                self.provider.complete(request).await
+            } else {
+                self.provider.complete_stream(request, &self.output).await
+            }
+            .with_context(|| {
+                format!("Failed to request {} model response", self.provider.name())
+            })?;
             let outcome = ResponseProcessor::new(response)
                 .with_limits(self.config.limits)
                 .with_runtime(self.output.clone(), Arc::clone(&self.config.lua))

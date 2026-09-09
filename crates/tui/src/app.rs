@@ -57,6 +57,7 @@ pub struct App {
     id: String,
     pub input: String,
     lines: VecDeque<Line<'static>>,
+    streaming: String,
     status: String,
     busy: bool,
     scroll_back: u16,
@@ -78,6 +79,7 @@ impl App {
             id: session.id().to_owned(),
             input: String::new(),
             lines: VecDeque::new(),
+            streaming: String::new(),
             status: "Loading provider catalog…".into(),
             busy: false,
             scroll_back: 0,
@@ -143,7 +145,20 @@ impl App {
     pub fn event(&mut self, event: Event) {
         match event {
             Event::User(text) => self.append("YOU", &text, ACCENT),
-            Event::Assistant(text) => self.append("ASSISTANT", &text, SUCCESS),
+            Event::Assistant(text) => {
+                self.streaming.clear();
+                self.append("ASSISTANT", &text, SUCCESS);
+            }
+            Event::AssistantDelta(text) => {
+                self.status = "Receiving response…".into();
+                self.streaming.push_str(&text);
+            }
+            Event::AssistantAborted => {
+                let text = std::mem::take(&mut self.streaming);
+                if !text.is_empty() {
+                    self.append("INCOMPLETE RESPONSE", &text, WARNING);
+                }
+            }
             Event::Tool(text) => self.append("TOOL", &text, Color::Rgb(177, 145, 255)),
             Event::Progress(text) => {
                 self.status.clone_from(&text);
@@ -691,7 +706,28 @@ impl App {
 
     fn wrapped_transcript(&self, width: usize) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
-        for line in &self.lines {
+        let mut preview = Vec::new();
+        if !self.streaming.is_empty() {
+            preview.push(Line::from("ASSISTANT").fg(SUCCESS).bold());
+            preview.extend(
+                self.streaming
+                    .lines()
+                    .rev()
+                    .take(MAX_LINES - 1)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .map(|line| {
+                        Line::from(line.chars().filter(|c| !c.is_control()).collect::<String>())
+                    }),
+            );
+        }
+        for line in self
+            .lines
+            .iter()
+            .chain(&preview)
+            .skip((self.lines.len() + preview.len()).saturating_sub(MAX_LINES))
+        {
             let text = line.to_string();
             if text.is_empty() {
                 lines.push(Line::default());
@@ -932,6 +968,37 @@ mod tests {
         let mut app = App::new(&session, false);
         app.catalog_loading = false;
         Ok(app)
+    }
+
+    #[test]
+    fn streams_without_duplicate_messages_and_marks_partial_failures() -> Result<()> {
+        let mut app = app()?;
+        app.lines.clear();
+        app.event(Event::AssistantDelta("Hello ".into()));
+        app.event(Event::AssistantDelta("世界\nsecond".into()));
+        let preview = app.wrapped_transcript(80);
+        assert!(preview.iter().any(|line| line.to_string() == "Hello 世界"));
+        assert!(app.lines.is_empty());
+        app.event(Event::Assistant("Hello 世界\nsecond".into()));
+        assert!(app.streaming.is_empty());
+        assert_eq!(
+            app.wrapped_transcript(80)
+                .iter()
+                .filter(|line| line.to_string() == "Hello 世界")
+                .count(),
+            1
+        );
+        app.event(Event::AssistantDelta("unfinished".into()));
+        app.event(Event::AssistantAborted);
+        assert!(app.streaming.is_empty());
+        assert!(
+            app.lines
+                .iter()
+                .any(|line| line.to_string() == "INCOMPLETE RESPONSE")
+        );
+        app.event(Event::AssistantDelta("line\n".repeat(MAX_LINES + 10)));
+        assert_eq!(app.wrapped_transcript(80).len(), MAX_LINES);
+        Ok(())
     }
 
     #[test]

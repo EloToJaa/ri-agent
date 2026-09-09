@@ -36,7 +36,7 @@ The executable is named `ri`. `ri login` authenticates with OpenRouter; `ri logi
 
 ### Interactive interface
 
-The TUI uses a responsive agent-workbench layout: a provider/session rail, persistent model and reasoning state, a bordered transcript, an activity-aware composer, and searchable modal selectors. It keeps conversation history across prompts and shows assistant responses, tool results, and model/tool activity. Responses appear when complete, not token-by-token.
+The TUI uses a responsive agent-workbench layout: a provider/session rail, persistent model and reasoning state, a bordered transcript, an activity-aware composer, and searchable modal selectors. It keeps conversation history across prompts and shows assistant responses, tool results, and model/tool activity. OpenRouter and Codex response text streams into the transcript as it arrives; the one-shot CLI also streams to stdout. Completed text replaces the provisional TUI preview without duplication. Failed streams are marked as incomplete in the TUI and are not saved as completed responses. Tool calls execute only after the response completes successfully. OpenRouter-compatible endpoints that return JSON still work, with buffered output.
 
 - **Ctrl+D** or **Ctrl+C**: quit.
 - **F2**: search the active provider’s live model catalog. Switching models resets the reasoning override and removes old model-specific reasoning metadata, but preserves conversation text and tool results.
@@ -116,7 +116,7 @@ The file returns a table with:
 
 - `settings`: `model`, `reasoning_effort`, `base_url`, `max_turns`, `command_timeout`, `max_output_bytes`.
 - `hooks.before_prompt(text)`: transform each submitted user prompt.
-- `hooks.after_response(text)`: transform assistant text before display and storage, including text accompanying tool calls.
+- `hooks.after_response(text)`: transform assistant text before display and storage, including text accompanying tool calls. Configuring this hook buffers response text until the hook finishes, so untransformed text is never displayed.
 - `tools`: an array of `{ name, description, parameters, execute }`. `parameters` is an object JSON schema; `execute(args)` receives decoded JSON arguments. Return a string or a JSON-serializable Lua value. Validate arguments inside the tool; schemas are advertised to the model, not enforced locally. Names cannot shadow built-ins or each other.
 
 Hooks return a replacement string or `nil` to leave text unchanged. Hook errors fail the current turn. Tool errors are returned to the model for recovery. Custom tool results are capped by `max_output_bytes` before entering model history.
@@ -176,6 +176,8 @@ Browser login uses S256 PKCE with a random verifier and no API key in the browse
 The root Cargo manifest is workspace-only. `crates/agent/src/providers/openrouter.rs` handles OpenRouter catalog capabilities; `crates/agent/src/sessions.rs` handles SQLite persistence.
 
 The main library re-exports the Lua crate as `ri_agent::config`. Frontends use `Session` and an event channel (`Output::channel`); `Output::default` writes CLI output. Sessions own conversation history and expose `submit` and `clear`.
+
+`Provider::complete_stream` emits provisional `Event::AssistantDelta` text and returns the complete response; its default implementation delegates to `complete` for existing providers. `Event::Assistant` is authoritative and replaces any preview; `Event::AssistantAborted` marks an unfinished preview. Only complete messages enter conversation history. The shared SSE reader handles fragmented UTF-8, CR/LF framing, multiline data, and keepalive comments, with an 8 MiB per-event limit. Missing completion markers and provider error events fail the turn without executing pending tools. Protocol references: [OpenAI streaming responses](https://developers.openai.com/api/docs/guides/streaming-responses) and [OpenRouter reasoning details](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
 
 ## Development
 
