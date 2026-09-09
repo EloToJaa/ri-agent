@@ -35,6 +35,7 @@ pub struct Session {
     id: String,
     store: Option<SessionStore>,
     revision: i64,
+    skills: crate::skills::Skills,
 }
 
 impl Session {
@@ -47,7 +48,18 @@ impl Session {
             id: uuid::Uuid::new_v4().to_string(),
             store: None,
             revision: 0,
+            skills: crate::skills::Skills::default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_skills(mut self, skills: crate::skills::Skills) -> Self {
+        self.skills = skills;
+        self
+    }
+
+    pub const fn skills(&self) -> &crate::skills::Skills {
+        &self.skills
     }
 
     pub fn provider(&self) -> Arc<dyn Provider> {
@@ -204,6 +216,7 @@ impl Session {
     }
 
     async fn run_turn(&mut self, prompt: String, stable_len: usize) -> Result<()> {
+        let prompt = self.skills.expand(prompt).await?;
         let prompt = self.config.lua.hook("before_prompt", prompt).await?;
         self.messages.push(Message::User { content: prompt });
         self.checkpoint(true, stable_len).await?;

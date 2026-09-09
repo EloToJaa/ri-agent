@@ -10,5 +10,6 @@ pub use ri_agent_lua as config;
 mod message;
 mod response;
 mod response_processor;
+pub mod skills;
 mod tools;
 pub use tools::{FileMatches, find_files};

@@ -30,6 +30,7 @@ pub fn suggestions(input: &str) -> Vec<&'static str> {
         .collect()
 }
 
+#[cfg(test)]
 pub fn complete(input: &str, selected: usize) -> Option<String> {
     suggestions(input)
         .get(selected)

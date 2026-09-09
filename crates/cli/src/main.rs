@@ -151,7 +151,14 @@ async fn main() -> Result<()> {
         },
         lua,
     };
-    let mut session = Session::new(provider, config, Output::default());
+    let skills = ri_agent::skills::Skills::discover(&[
+        ri_agent::config::harness_directory()?.join("skills"),
+        std::env::current_dir()?.join(".ri/skills"),
+    ]);
+    for warning in &skills.warnings {
+        eprintln!("Skill warning: {warning}");
+    }
+    let mut session = Session::new(provider, config, Output::default()).with_skills(skills);
     if let Some(store) = store {
         session = session.with_store(store);
     }

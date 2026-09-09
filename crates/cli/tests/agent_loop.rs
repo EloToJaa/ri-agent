@@ -107,6 +107,51 @@ fn cli(address: SocketAddr) -> Command {
     command
 }
 
+#[test]
+fn expands_project_skills_before_sending_the_prompt() -> Result<()> {
+    let (address, handle) = server(vec![(
+        "POST",
+        json!({"choices":[{"message":{"content":"Reviewed"}}]}),
+    )])?;
+    let root = std::env::temp_dir().join(format!(
+        "ri-skills-{}-{}",
+        std::process::id(),
+        address.port()
+    ));
+    let skill_dir = root.join(".ri/skills/review");
+    std::fs::create_dir_all(&skill_dir)?;
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: review\ndescription: Review code\n---\nLook for regressions before style issues.",
+    )?;
+    let mut command = cli(address);
+    command
+        .current_dir(&root)
+        .args(["--no-save", "-p", "$review the changes"]);
+    let output = wait(command)?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let requests = requests(handle)?;
+    let prompt = field(&requests, "/0/messages/0/content")?
+        .as_str()
+        .context("Missing prompt")?;
+    assert!(prompt.starts_with("$review the changes"));
+    assert!(prompt.contains("Look for regressions before style issues."));
+    assert!(prompt.contains(&skill_dir.canonicalize()?.display().to_string()));
+    let mut command = cli(address);
+    command
+        .current_dir(&root)
+        .args(["--no-save", "-p", "$missing"]);
+    let output = wait(command)?;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Unknown skill '$missing'"));
+    std::fs::remove_dir_all(root)?;
+    Ok(())
+}
+
 fn run(responses: Vec<Value>, max_turns: usize) -> Result<(Output, Value)> {
     let (address, handle) = server(
         responses

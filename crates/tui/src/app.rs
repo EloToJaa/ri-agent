@@ -66,6 +66,7 @@ pub struct App {
     persistence: bool,
     command_selection: usize,
     file_search: Option<FileSearch>,
+    skills: ri_agent::skills::Skills,
 }
 
 impl App {
@@ -86,12 +87,16 @@ impl App {
             persistence: session.store().is_some(),
             command_selection: 0,
             file_search: None,
+            skills: session.skills().clone(),
         };
         app.append(
             "HARNESS",
             "Describe a task to begin. Tools run locally without approval.",
             Color::Yellow,
         );
+        for warning in &session.skills().warnings {
+            app.append("SKILL", warning, Color::Yellow);
+        }
         for event in session.history() {
             app.event(event);
         }
@@ -349,7 +354,7 @@ impl App {
             SlashCommand::Login => self.send(commands, Command::Login)?,
             SlashCommand::Help => self.append(
                 "COMMANDS",
-                "/provider [openrouter|openai-codex] (new conversation) · /model [query] · /reasoning [effort] · /resume [id] · /login · /help",
+                "/provider [openrouter|openai-codex] (new conversation) · /model [query] · /reasoning [effort] · /resume [id] · /login · /help\n$skill-name invokes an installed skill; type $ then Tab to complete. @ selects a file.",
                 Color::Cyan,
             ),
         }
@@ -555,16 +560,66 @@ impl App {
         Ok(false)
     }
 
+    fn completions(&self) -> Option<(usize, Vec<Item>)> {
+        if self.input.starts_with('/') && !self.input.chars().any(char::is_whitespace) {
+            return Some((
+                0,
+                commands::suggestions(&self.input)
+                    .into_iter()
+                    .map(|command| Item {
+                        label: command.into(),
+                        value: command.into(),
+                    })
+                    .collect(),
+            ));
+        }
+        let start = self
+            .input
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace())
+            .map_or(0, |(index, c)| index + c.len_utf8());
+        let prefix = self.input.get(start..)?.strip_prefix('$')?;
+        if !prefix
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        {
+            return None;
+        }
+        Some((
+            start,
+            self.skills
+                .suggestions(prefix)
+                .into_iter()
+                .map(|skill| Item {
+                    label: format!(
+                        "${} · {}",
+                        skill.name,
+                        skill
+                            .description
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ),
+                    value: format!("${}", skill.name),
+                })
+                .collect(),
+        ))
+    }
+
     fn command_completion_key(
         &mut self,
         key: KeyCode,
         sender: &mpsc::UnboundedSender<Command>,
     ) -> Result<bool> {
-        if !self.input.trim_start().starts_with('/') || self.input.chars().any(char::is_whitespace)
-        {
+        let Some((start, suggestions)) = self.completions() else {
             return Ok(false);
+        };
+        if key == KeyCode::Esc {
+            self.input.truncate(start);
+            self.command_selection = 0;
+            return Ok(true);
         }
-        let suggestions = commands::suggestions(self.input.trim_start());
         if suggestions.is_empty() {
             return Ok(false);
         }
@@ -581,31 +636,19 @@ impl App {
             KeyCode::Down => {
                 self.command_selection = (self.command_selection + 1) % suggestions.len();
             }
-            KeyCode::Tab => {
-                if let Some(completion) =
-                    commands::complete(self.input.trim_start(), self.command_selection)
-                {
-                    self.input = completion;
-                    self.command_selection = 0;
+            KeyCode::Tab | KeyCode::Enter => {
+                if let Some(selected) = suggestions.get(self.command_selection) {
+                    if key == KeyCode::Enter
+                        && self.input.get(start..) == Some(selected.value.as_str())
+                    {
+                        self.enter(sender)?;
+                    } else {
+                        self.input.truncate(start);
+                        self.input.push_str(&selected.value);
+                        self.input.push(' ');
+                        self.command_selection = 0;
+                    }
                 }
-            }
-            KeyCode::Enter => {
-                let selected = suggestions
-                    .get(self.command_selection)
-                    .copied()
-                    .unwrap_or_default();
-                if self.input.trim() == selected {
-                    self.enter(sender)?;
-                } else if let Some(completion) =
-                    commands::complete(self.input.trim_start(), self.command_selection)
-                {
-                    self.input = completion;
-                    self.command_selection = 0;
-                }
-            }
-            KeyCode::Esc => {
-                self.input.clear();
-                self.command_selection = 0;
             }
             _ => return Ok(false),
         }
@@ -621,6 +664,7 @@ impl App {
             }
             return;
         }
+        self.command_selection = 0;
         self.input.extend(
             text.chars()
                 .map(|c| if c.is_whitespace() { ' ' } else { c })
@@ -759,7 +803,7 @@ impl App {
         let title = if self.busy {
             " DRAFT · agent working "
         } else {
-            " PROMPT · Enter sends · @ files "
+            " PROMPT · Enter sends · @ files · $ skills "
         };
         let available = usize::from(area.width.saturating_sub(3));
         let mut visible = self.input.as_str();
@@ -789,34 +833,48 @@ impl App {
     }
 
     fn draw_command_completion(&self, frame: &mut Frame, input: Rect) {
-        if !self.input.trim_start().starts_with('/') || self.input.chars().any(char::is_whitespace)
-        {
+        let Some((start, suggestions)) = self.completions() else {
+            return;
+        };
+        let skills = self
+            .input
+            .get(start..)
+            .is_some_and(|text| text.starts_with('$'));
+        if suggestions.is_empty() && !skills {
             return;
         }
-        let suggestions = commands::suggestions(self.input.trim_start());
-        if suggestions.is_empty() {
-            return;
-        }
-        let height = u16::try_from(suggestions.len())
+        let height = u16::try_from(suggestions.len().max(1))
             .unwrap_or(u16::MAX)
-            .saturating_add(2);
+            .saturating_add(2)
+            .min(10)
+            .min(input.y);
         let popup = Rect {
             x: input.x,
             y: input.y.saturating_sub(height),
-            width: input.width.min(32),
+            width: input.width.min(if skills { 86 } else { 48 }),
             height,
         };
         frame.render_widget(Clear, popup);
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(" Commands · ↑/↓ choose · Tab complete ")
+            .title(if skills {
+                " Skills · ↑/↓ choose · Tab complete "
+            } else {
+                " Commands · ↑/↓ choose · Tab complete "
+            })
             .border_style(Style::default().fg(Color::Cyan));
         let inner = block.inner(popup);
         frame.render_widget(block, popup);
-        let items = suggestions
-            .into_iter()
-            .map(ListItem::new)
-            .collect::<Vec<_>>();
+        let items = if suggestions.is_empty() {
+            vec![ListItem::new(
+                "No matching skills · install in ~/.ri/skills or .ri/skills",
+            )]
+        } else {
+            suggestions
+                .into_iter()
+                .map(|item| ListItem::new(item.label))
+                .collect::<Vec<_>>()
+        };
         let selected = self.command_selection.min(items.len().saturating_sub(1));
         let mut state = ListState::default().with_selected(Some(selected));
         frame.render_stateful_widget(
@@ -930,6 +988,45 @@ mod tests {
                 .iter()
                 .any(|line| line.to_string().contains("fd unavailable"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn completes_skills_inline_and_submits_exact_names() -> Result<()> {
+        let mut app = app()?;
+        app.skills = ri_agent::skills::Skills::discover(&[std::path::PathBuf::from(env!(
+            "CARGO_MANIFEST_DIR"
+        ))
+        .join("../../.ri/skills")]);
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        app.input = "Please $".into();
+        let (_, items) = app.completions().context("Missing skill completion")?;
+        assert_eq!(items.len(), 2);
+        app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &sender)?;
+        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &sender)?;
+        assert_eq!(app.input, "Please $test ");
+        assert!(receiver.try_recv().is_err());
+        app.input = "$rev".into();
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &sender)?;
+        assert_eq!(app.input, "$review ");
+        assert!(receiver.try_recv().is_err());
+        app.input = "Please $review".into();
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &sender)?;
+        assert!(
+            matches!(receiver.try_recv()?, Command::Submit(prompt) if prompt == "Please $review")
+        );
+        app.input = "Draft $unknown".into();
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &sender)?;
+        assert_eq!(app.input, "Draft ");
+        app.input = "cost$review".into();
+        assert!(app.completions().is_none());
+        app.input = "$HOME".into();
+        assert!(app.completions().is_none());
+        app.input = "$".into();
+        for (width, height) in [(80, 24), (10, 4), (1, 1)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+            terminal.draw(|frame| app.draw(frame))?;
+        }
         Ok(())
     }
 

@@ -44,6 +44,7 @@ The TUI uses a responsive agent-workbench layout: a provider/session rail, persi
 - **Provider selection**: `/provider` opens the provider picker; `/provider openrouter` or `/provider openai-codex` switches directly. Switching loads environment/saved credentials, starts a new conversation with that provider’s default model and reasoning, and refreshes its catalog. Codex chooses an advertised model from its live catalog rather than relying on a retired default slug. Previous saved sessions remain available: switch back to their provider before resuming them. Missing credentials or a failed checkpoint leaves the current conversation unchanged. Authenticate first with `ri login --provider <id>`. The configured OpenRouter base URL is preserved when switching back.
 - **Slash commands**: `/provider [id]`, `/model [query]`, `/reasoning [effort]`, `/resume [id]`, `/login`, and `/help`. Typing `/` opens command suggestions; Up/Down selects a command, Tab completes it, Enter completes a partial command or executes an exact command, and Esc dismisses the input. Commands can be typed or pasted into the prompt; `/model`, `/reasoning`, and `/resume` with no argument open their pickers. `/login` runs the `ri login` flow from the TUI and saves the credential; restart the TUI afterward because provider credentials are fixed when a session starts.
 - **F5**: refresh the catalog after a network error. The configured model still works without a catalog when using provider-default reasoning.
+- **$skill-name** at the start of a prompt or after whitespace: autocomplete installed skills inline, like slash commands. Up/Down selects, Tab completes, Enter completes a partial name or submits an exact name, and Esc cancels the current completion. Skill instructions are loaded on submission; you can combine skills and text, e.g. `$review focus on persistence` or `Check this change with $test`.
 - **@** at the start of a prompt or after whitespace: open a searchable file picker backed by `fd` in the current working directory. Type or paste to filter, use Up/Down to select, Enter to insert a reference such as `@src/main.rs` (no quotes or leading `./`; spaces and backslashes are escaped), and Esc to cancel. Selection inserts a path, not file contents; the agent can use Read to inspect it. Discovery respects ignore files and excludes hidden files, runs asynchronously with a 10-second timeout, and retains at most 1 MiB of paths (with a truncation notice).
 - **Enter**: send a prompt when idle. You can draft the next prompt while the agent works. Model, reasoning, and session changes are only available when idle.
 - **Backspace**: delete the last character/grapheme.
@@ -67,6 +68,36 @@ cargo run -p ri-agent-cli -- --session-db /path/to/sessions.sqlite3
 ```
 
 Resume restores the saved model and reasoning choice rather than configuration defaults. New Lua configuration and limits apply when the process starts. Ctrl+L creates a new session without deleting the old one. Tools are never replayed during resume. Interrupted runs restore the last completed user prompt and show a warning: local side effects from the discarded incomplete turn may remain. Optimistic revisions prevent simultaneous processes from silently overwriting the same session. Persistence errors stop the turn rather than silently losing history.
+
+## Skills
+
+Skills are Markdown instructions invoked explicitly with `$name`, not executable plugins. The CLI and TUI discover skills at startup from:
+
+- `~/.ri/skills/<directory>/SKILL.md` — personal skills.
+- `.ri/skills/<directory>/SKILL.md` — skills in the current working directory; these override personal skills with the same name.
+
+This repository includes `$review` and `$test` project skills. Install additional skills by creating a directory and a `SKILL.md` file:
+
+```markdown
+---
+name: explain
+description: Explain a code path and its important trade-offs.
+---
+Read the requested code. Explain the data flow, error paths, and relevant tests.
+Do not modify files unless requested.
+```
+
+Names use 1–64 lowercase letters, digits, or hyphens, without leading/trailing hyphens. YAML frontmatter must contain a name and nonempty description; the Markdown body must also be nonempty. Only immediate child directories are scanned. Invalid skills are skipped with warnings; restart after installing or renaming a skill. Existing skill bodies are reread when invoked.
+
+```sh
+ri -p '$review the current changes'  # Single quotes prevent shell expansion
+```
+
+Mention multiple skills to combine their instructions; repeated mentions load a skill only once. Unknown `$names` fail before any model request. Escape a literal reference as `\$name`; uppercase shell variables such as `$HOME` are not skill invocations. Relative paths inside skills are resolved by the agent against the skill's directory, which is included with its instructions. File references remain paths for the agent to read, not automatic file attachments.
+
+Skill files are limited to 128 KiB each and expanded skill prompts to 512 KiB. The expanded instructions are stored with the prompt, so resuming history does not reload or rerun past skills. Lua `before_prompt` hooks receive the expanded prompt. Library users attach discovered skills through `Session::with_skills`.
+
+**Trust:** project skills are not automatically invoked, but explicitly invoking one lets its instructions guide the agent's local tools. Review skills before use. Discovery and loading do not execute scripts; scripts referenced by a skill run only if the agent chooses to call a tool.
 
 ## Lua configuration
 
