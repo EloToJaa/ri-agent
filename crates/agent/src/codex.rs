@@ -49,6 +49,66 @@ impl Codex {
     }
 }
 
+#[derive(Deserialize)]
+struct Catalog {
+    models: Vec<CatalogModel>,
+}
+
+#[derive(Deserialize)]
+struct CatalogModel {
+    slug: String,
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
+    default_reasoning_level: Option<String>,
+    #[serde(default)]
+    supported_reasoning_levels: Vec<ReasoningLevel>,
+    #[serde(default)]
+    priority: usize,
+}
+
+#[derive(Deserialize)]
+struct ReasoningLevel {
+    effort: String,
+}
+
+fn catalog_models(mut catalog: Catalog) -> Result<Vec<Model>> {
+    catalog.models.sort_by_key(|entry| entry.priority);
+    let mut seen = std::collections::HashSet::new();
+    let models = catalog
+        .models
+        .into_iter()
+        .filter(|entry| seen.insert(entry.slug.clone()))
+        .map(|entry| {
+            let levels: Vec<String> = entry
+                .supported_reasoning_levels
+                .into_iter()
+                .map(|level| level.effort)
+                .collect();
+            Model {
+                id: entry.slug,
+                name: entry.display_name,
+                supported_parameters: vec!["tools".into(), "reasoning".into()],
+                reasoning: Some(ReasoningCapabilities {
+                    mandatory: !levels.iter().any(|level| level == "none"),
+                    default_effort: entry.default_reasoning_level,
+                    supported_efforts: SupportedEfforts::Levels(levels),
+                }),
+            }
+        })
+        .collect::<Vec<_>>();
+    if models.is_empty() {
+        bail!("OpenAI Codex catalog contains no models");
+    }
+    Ok(models)
+}
+
+fn catalog_request(client: &Client, base_url: &str) -> reqwest::RequestBuilder {
+    client
+        .get(format!("{base_url}/models"))
+        .query(&[("client_version", env!("CARGO_PKG_VERSION"))])
+}
+
 impl Provider for Codex {
     fn id(&self) -> &'static str {
         "openai-codex"
@@ -59,24 +119,8 @@ impl Provider for Codex {
 
     fn models(&self) -> ProviderFuture<'_, Vec<Model>> {
         Box::pin(async {
-            #[derive(Deserialize)]
-            struct Catalog {
-                models: Vec<CatalogModel>,
-            }
-            #[derive(Deserialize)]
-            struct CatalogModel {
-                slug: String,
-                #[serde(default)]
-                display_name: String,
-                #[serde(default)]
-                supported_reasoning_levels: Vec<ReasoningLevel>,
-            }
-            #[derive(Deserialize)]
-            struct ReasoningLevel {
-                effort: String,
-            }
             let catalog = self
-                .request(self.client.get(format!("{}/models", self.base_url)))
+                .request(catalog_request(&self.client, &self.base_url))
                 .send()
                 .await
                 .context("Fetching OpenAI Codex model catalog")?
@@ -85,32 +129,7 @@ impl Provider for Codex {
                 .json::<Catalog>()
                 .await
                 .context("Invalid OpenAI Codex model catalog")?;
-            let mut models = catalog
-                .models
-                .into_iter()
-                .map(|entry| Model {
-                    id: entry.slug,
-                    name: entry.display_name,
-                    supported_parameters: vec!["tools".into(), "reasoning".into()],
-                    reasoning: Some(ReasoningCapabilities {
-                        mandatory: true,
-                        default_effort: None,
-                        supported_efforts: SupportedEfforts::Levels(
-                            entry
-                                .supported_reasoning_levels
-                                .into_iter()
-                                .map(|level| level.effort)
-                                .collect(),
-                        ),
-                    }),
-                })
-                .collect::<Vec<_>>();
-            models.sort_by(|a, b| a.id.cmp(&b.id));
-            models.dedup_by(|a, b| a.id == b.id);
-            if models.is_empty() {
-                bail!("OpenAI Codex catalog contains no models");
-            }
-            Ok(models)
+            catalog_models(catalog)
         })
     }
 
@@ -229,4 +248,58 @@ fn parse_response(value: &Value) -> Result<Completion> {
         reasoning_details: None,
         tool_calls,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::ReasoningEffort;
+
+    #[test]
+    fn catalog_request_includes_client_version() -> Result<()> {
+        let request = catalog_request(&Client::new(), DEFAULT_BASE_URL).build()?;
+        assert_eq!(request.url().path(), "/backend-api/codex/models");
+        assert!(
+            request
+                .url()
+                .query_pairs()
+                .any(|(key, value)| key == "client_version" && value == env!("CARGO_PKG_VERSION"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn maps_codex_catalog_reasoning_levels_and_default() -> Result<()> {
+        let models = catalog_models(serde_json::from_str(include_str!(
+            "../tests/fixtures/codex_models.json"
+        ))?)?;
+        let model = models.first().context("Missing model")?;
+        assert_eq!(
+            model.efforts(),
+            vec![
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::Xhigh
+            ]
+        );
+        assert_eq!(
+            model
+                .reasoning
+                .as_ref()
+                .and_then(|r| r.default_effort.as_deref()),
+            Some("medium")
+        );
+        let models = catalog_models(serde_json::from_value(json!({"models": [
+            {"slug":"optional", "supported_reasoning_levels":[{"effort":"none"},{"effort":"high"},{"effort":"future"}]},
+            {"slug":"unknown"}
+        ]}))?)?;
+        assert_eq!(
+            models.first().context("Missing model")?.efforts(),
+            vec![ReasoningEffort::None, ReasoningEffort::High]
+        );
+        assert!(models.get(1).context("Missing model")?.efforts().is_empty());
+        assert!(catalog_models(serde_json::from_str(r#"{"models":[]}"#)?).is_err());
+        Ok(())
+    }
 }

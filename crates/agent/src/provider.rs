@@ -27,6 +27,25 @@ pub fn connect(id: &str, openrouter_base_url: &str) -> Result<std::sync::Arc<dyn
     }
 }
 
+/// Use a currently advertised model for Codex instead of a potentially retired slug.
+pub async fn initial_model(provider: &dyn Provider) -> Result<String> {
+    let fallback = default_model(provider.id())?;
+    if provider.id() != "openai-codex" {
+        return Ok(fallback.into());
+    }
+    let models = provider.models().await?;
+    preferred_model(&models, fallback)
+}
+
+fn preferred_model(models: &[Model], preferred: &str) -> Result<String> {
+    models
+        .iter()
+        .find(|model| model.id == preferred)
+        .or_else(|| models.first())
+        .map(|model| model.id.clone())
+        .context("Provider catalog contains no models")
+}
+
 pub fn default_model(id: &str) -> Result<&'static str> {
     match id {
         "openrouter" => Ok("anthropic/claude-haiku-4.5"),
@@ -130,6 +149,20 @@ impl Model {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn selects_an_advertised_default_when_the_preferred_model_is_retired() -> Result<()> {
+        let models: Vec<Model> = serde_json::from_value(json!([
+            {"id":"current-model"}, {"id":"preferred-model"}
+        ]))?;
+        assert_eq!(
+            preferred_model(&models, "preferred-model")?,
+            "preferred-model"
+        );
+        assert_eq!(preferred_model(&models, "retired-model")?, "current-model");
+        assert!(preferred_model(&[], "retired-model").is_err());
+        Ok(())
+    }
 
     #[test]
     fn distinguishes_missing_null_and_restricted_efforts() -> Result<()> {

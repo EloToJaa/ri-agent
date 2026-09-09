@@ -55,9 +55,8 @@ async fn execute(command: Command, session: &mut Session, base_url: &str) -> Res
         Command::Provider(id) => {
             if id != session.provider().id() {
                 let provider = provider::connect(&id, base_url)?;
-                session
-                    .switch_provider(provider, provider::default_model(&id)?.into())
-                    .await?;
+                let model = provider::initial_model(provider.as_ref()).await?;
+                session.switch_provider(provider, model).await?;
                 return Ok(Outcome::ProviderChanged {
                     id: session.id().to_owned(),
                     selection: session.selection(),

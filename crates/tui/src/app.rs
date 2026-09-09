@@ -194,6 +194,13 @@ impl App {
             Ok(models) => {
                 self.models = models;
                 self.status = "Ready · F2 model · F3 reasoning · F4 sessions".into();
+                if !self
+                    .models
+                    .iter()
+                    .any(|model| model.id == self.selection.model)
+                {
+                    self.append("MODEL", &format!("Selected model '{}' is not in the {} catalog. Use /model to select one; check MODEL or --model if this is unexpected.", self.selection.model, self.provider_name), Color::Yellow);
+                }
             }
             Err(error) => self.append(
                 "CATALOG",
@@ -201,6 +208,42 @@ impl App {
                 Color::Yellow,
             ),
         }
+        // Pickers opened while discovery was in flight must receive the new capabilities.
+        if let Some(kind) = self.picker.as_ref().map(|picker| picker.kind)
+            && matches!(kind, Kind::Model | Kind::Reasoning)
+        {
+            self.open_picker(kind);
+        }
+    }
+
+    fn reasoning_default_label(&self) -> String {
+        let detail = if self.catalog_loading {
+            "catalog loading".to_owned()
+        } else if self.models.is_empty() {
+            "catalog unavailable; F5 retries".to_owned()
+        } else if let Some(model) = self
+            .models
+            .iter()
+            .find(|model| model.id == self.selection.model)
+        {
+            model
+                .reasoning
+                .as_ref()
+                .and_then(|reasoning| reasoning.default_effort.as_ref())
+                .map_or_else(
+                    || {
+                        if model.efforts().is_empty() {
+                            "no effort levels advertised".to_owned()
+                        } else {
+                            "omit reasoning override".to_owned()
+                        }
+                    },
+                    |effort| format!("{effort}; omit override"),
+                )
+        } else {
+            "model absent from catalog; use /model".to_owned()
+        };
+        format!("Provider default ({detail})")
     }
 
     fn available_efforts(&self) -> Vec<ReasoningEffort> {
@@ -328,7 +371,7 @@ impl App {
             ),
             Kind::Reasoning => {
                 let mut items = vec![Item {
-                    label: "Provider default (omit reasoning override)".into(),
+                    label: self.reasoning_default_label(),
                     value: "default".into(),
                 }];
                 items.extend(self.available_efforts().into_iter().map(|effort| Item {
@@ -867,6 +910,31 @@ mod tests {
                 .iter()
                 .any(|line| line.to_string().contains("fd unavailable"))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn reasoning_picker_updates_when_catalog_arrives() -> Result<()> {
+        let mut app = app()?;
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        app.catalog_loading = true;
+        app.open_picker(Kind::Reasoning);
+        assert!(app.reasoning_default_label().contains("loading"));
+        let model = serde_json::from_value(serde_json::json!({
+            "id":app.selection.model,
+            "reasoning":{"mandatory":true,"default_effort":"medium","supported_efforts":["low","medium","high","xhigh"]}
+        }))?;
+        app.catalog(Ok(vec![model]));
+        assert!(app.reasoning_default_label().contains("medium"));
+        app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &sender)?;
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &sender)?;
+        assert!(
+            matches!(receiver.try_recv()?, Command::Select(selection) if selection.reasoning_effort == Some(ReasoningEffort::Low))
+        );
+        app.selection.model = "missing-model".into();
+        assert!(app.reasoning_default_label().contains("model absent"));
+        app.models.clear();
+        assert!(app.reasoning_default_label().contains("F5"));
         Ok(())
     }
 

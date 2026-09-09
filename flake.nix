@@ -70,7 +70,6 @@
             ripgrep
             fd
           ];
-          MODEL = "minimax/minimax-m3:free";
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
         };
 

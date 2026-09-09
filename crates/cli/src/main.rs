@@ -127,17 +127,12 @@ async fn main() -> Result<()> {
         .or_else(|| settings.base_url.clone())
         .unwrap_or_else(|| openrouter::DEFAULT_BASE_URL.into());
     let provider = ri_agent::provider::connect(&args.provider, &base_url)?;
+    let model = match args.model.or_else(|| settings.model.clone()) {
+        Some(model) => model,
+        None => ri_agent::provider::initial_model(provider.as_ref()).await?,
+    };
     let config = AgentConfig {
-        model: args
-            .model
-            .or_else(|| settings.model.clone())
-            .unwrap_or_else(|| {
-                if args.provider == "openai-codex" {
-                    "gpt-5.1-codex".into()
-                } else {
-                    "anthropic/claude-haiku-4.5".into()
-                }
-            }),
+        model,
         reasoning_effort: args.reasoning.or(settings.reasoning_effort),
         max_turns: args
             .max_turns
@@ -175,7 +170,13 @@ async fn main() -> Result<()> {
         let model = models
             .iter()
             .find(|model| model.id == selection.model)
-            .context("Selected model is not in the OpenRouter tool-capable catalog")?;
+            .with_context(|| {
+                format!(
+                    "Selected model '{}' is not in the {} catalog; check --model or MODEL",
+                    selection.model,
+                    session.provider().name()
+                )
+            })?;
         if !model.efforts().contains(&effort) {
             bail!(
                 "Model {} does not advertise reasoning effort {effort}",

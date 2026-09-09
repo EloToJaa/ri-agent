@@ -43,4 +43,4 @@ Existing commits use `feat(proj): description`; follow `type(scope): description
 
 ## Security & Configuration
 
-Set `OPENROUTER_API_KEY` through the environment; never commit credentials. `MODEL` or `--model` selects the model, and `OPENROUTER_BASE_URL` overrides the endpoint. The Nix shell sets its own default model. Read, Write, and Bash operate locally, so run prompts from an appropriate working directory.
+Set `OPENROUTER_API_KEY` through the environment; never commit credentials. `MODEL` or `--model` selects the model, and `OPENROUTER_BASE_URL` overrides the endpoint. The Nix shell does not set `MODEL`; defaults are provider-specific. Read, Write, and Bash operate locally, so run prompts from an appropriate working directory.
