@@ -36,15 +36,17 @@ The executable is named `ri`. `ri login` authenticates with OpenRouter using a b
 
 The TUI keeps conversation history across prompts and shows assistant responses, tool results, and model/tool activity. Responses appear when complete, not token-by-token.
 
+- **Ctrl+D** or **Ctrl+C**: quit.
 - **F2**: search OpenRouter’s live catalog of tool-capable models. Switching models resets the reasoning override and removes old model-specific reasoning metadata, but preserves conversation text and tool results.
 - **F3**: select reasoning effort or **Provider default**. Choices follow the selected model’s `reasoning.supported_efforts`; mandatory reasoning models never offer `none`. Missing capability metadata only offers provider defaults.
 - **F4**: search and resume saved sessions for this working directory.
+- **Slash commands**: `/model [query]`, `/reasoning [effort]`, `/resume [id]`, `/login`, and `/help`. Commands can be typed or pasted into the prompt; `/model`, `/reasoning`, and `/resume` with no argument open their pickers. `/login` prints the safe restart instructions because provider credentials are fixed when a session starts.
 - **F5**: refresh the catalog after a network error. The configured model still works without a catalog when using provider-default reasoning.
 - **Enter**: send a prompt when idle. You can draft the next prompt while the agent works. Model, reasoning, and session changes are only available when idle.
 - **Backspace**: delete the last character/grapheme.
 - **Page Up / Page Down**: scroll the transcript.
 - **Ctrl+L**: start a new conversation when idle.
-- **Ctrl+C**: quit and drop the active agent turn. Already-applied tool effects remain.
+Quitting drops the active agent turn; the SQLite checkpoint remains resumable and local tool effects already applied remain. Already-applied tool effects remain.
 
 The visible transcript retains up to 4,000 lines; model conversation history remains intact until cleared. Failed turns are removed from model history, without undoing local tool effects. The TUI requires a terminal; use `-p` for scripts and pipes.
 
@@ -96,7 +98,7 @@ CLI flags override environment variables (`MODEL`, `OPENROUTER_BASE_URL`), which
 | `--tui` | Force TUI, optionally with an initial `-p` prompt |
 | `--config` | User config path described above |
 | `--model` | `anthropic/claude-haiku-4.5` |
-| `--reasoning` | Provider default; accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` after catalog validation |
+| `--reasoning` | Provider default; accepts `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` after catalog capability validation |
 | `--resume [ID]` | Resume the latest session when ID is omitted |
 | `--sessions` | List saved sessions and exit |
 | `--session-db` | User SQLite database path described above |

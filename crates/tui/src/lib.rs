@@ -1,4 +1,5 @@
 mod app;
+mod commands;
 mod picker;
 
 use anyhow::{Context, Result, bail};
@@ -17,7 +18,7 @@ use ri_agent::{
 use std::io::{self, IsTerminal};
 use tokio::sync::mpsc;
 
-enum Command {
+pub(crate) enum Command {
     Submit(String),
     Select(Selection),
     Resume(String),

@@ -1,5 +1,6 @@
 use crate::{
     Command, Outcome,
+    commands::{self, SlashCommand},
     picker::{Item, Kind, Picker},
 };
 use anyhow::{Context, Result};
@@ -181,6 +182,48 @@ impl App {
         Ok(())
     }
 
+    pub fn enter(&mut self, commands: &mpsc::UnboundedSender<Command>) -> Result<()> {
+        if self.input.trim_start().starts_with('/') {
+            let input = std::mem::take(&mut self.input);
+            if let Err(error) = self.slash_command(&input, commands) {
+                self.append("COMMAND", &format!("{error:#}"), Color::Yellow);
+            }
+            return Ok(());
+        }
+        self.submit(commands)
+    }
+
+    fn slash_command(
+        &mut self,
+        input: &str,
+        commands: &mpsc::UnboundedSender<Command>,
+    ) -> Result<()> {
+        match commands::parse(input)? {
+            SlashCommand::Model(Some(query)) => {
+                let model = self.models.iter().find(|model| model.id == query || model.id.contains(&query)).map(|model| model.id.clone());
+                let Some(model) = model else { self.append("MODEL", "No matching OpenRouter model; use /model to search.", Color::Yellow); return Ok(()) };
+                self.send(commands, Command::Select(Selection { model, reasoning_effort: None }))?;
+            }
+            SlashCommand::Model(None) => self.open_picker(Kind::Model),
+            SlashCommand::Reasoning(Some(effort)) => {
+                if !self.available_efforts().contains(&effort) {
+                    self.append("REASONING", "That effort is not advertised for the selected model. Use /reasoning to inspect supported levels.", Color::Yellow);
+                    return Ok(())
+                }
+                self.send(commands, Command::Select(Selection { model: self.selection.model.clone(), reasoning_effort: Some(effort) }))?;
+            }
+            SlashCommand::Reasoning(None) => self.open_picker(Kind::Reasoning),
+            SlashCommand::Resume(Some(id)) => self.send(commands, Command::Resume(id))?,
+            SlashCommand::Resume(None) => {
+                if self.persistence { self.send(commands, Command::ListSessions)?; }
+                else { self.append("SESSION", "Persistence is disabled; restart without --no-save to resume sessions.", Color::Yellow); }
+            }
+            SlashCommand::Login => self.append("LOGIN", "Run `ri login` (or `ri login --manual`) in another terminal, then restart this session. The active provider credential is fixed for safety.", Color::Yellow),
+            SlashCommand::Help => self.append("COMMANDS", "/model [query] · /reasoning [effort] · /resume [id] · /login · /help", Color::Cyan),
+        }
+        Ok(())
+    }
+
     pub fn submit(&mut self, commands: &mpsc::UnboundedSender<Command>) -> Result<()> {
         if self.busy || self.catalog_loading || self.input.trim().is_empty() {
             return Ok(());
@@ -236,7 +279,9 @@ impl App {
         key: KeyEvent,
         commands: &mpsc::UnboundedSender<Command>,
     ) -> Result<bool> {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c' | 'd'))
+        {
             return Ok(true);
         }
         if let Some(picker) = &mut self.picker {
@@ -277,7 +322,7 @@ impl App {
             KeyCode::F(4) if !self.busy && self.persistence => {
                 self.send(commands, Command::ListSessions)?;
             }
-            KeyCode::Enter => self.submit(commands)?,
+            KeyCode::Enter => self.enter(commands)?,
             KeyCode::Backspace => {
                 if let Some((index, _)) = self.input.grapheme_indices(true).next_back() {
                     self.input.truncate(index);
@@ -460,6 +505,24 @@ mod tests {
             app.open_picker(Kind::Reasoning);
             terminal.draw(|frame| app.draw(frame))?;
         }
+        Ok(())
+    }
+
+    #[test]
+    fn supports_ctrl_d_and_slash_commands() -> Result<()> {
+        let mut app = app()?;
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        assert!(app.key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            &sender
+        )?);
+        app.input = "/help".into();
+        app.enter(&sender)?;
+        assert!(
+            app.lines
+                .iter()
+                .any(|line| line.to_string().contains("/model"))
+        );
         Ok(())
     }
 

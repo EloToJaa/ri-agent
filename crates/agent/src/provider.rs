@@ -69,7 +69,15 @@ impl Model {
 
     pub fn efforts(&self) -> Vec<ReasoningEffort> {
         let Some(reasoning) = &self.reasoning else {
-            return Vec::new();
+            return if self
+                .supported_parameters
+                .iter()
+                .any(|parameter| parameter == "reasoning" || parameter == "reasoning_effort")
+            {
+                ReasoningEffort::ALL.to_vec()
+            } else {
+                Vec::new()
+            };
         };
         ReasoningEffort::ALL
             .into_iter()
