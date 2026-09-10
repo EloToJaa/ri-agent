@@ -10,15 +10,17 @@ pub enum SlashCommand {
     Resume(Option<String>),
     Login { manual: bool },
     Help,
+    Compact,
 }
 
-const COMMANDS: [&str; 6] = [
+const COMMANDS: [&str; 7] = [
     "/model",
     "/reasoning",
     "/resume",
     "/login",
     "/help",
     "/provider",
+    "/compact",
 ];
 
 pub fn suggestions(input: &str) -> Vec<&'static str> {
@@ -64,6 +66,7 @@ pub fn parse(input: &str) -> Result<SlashCommand> {
             _ => bail!("Usage: /login [--manual]"),
         },
         "/help" => Ok(SlashCommand::Help),
+        "/compact" if argument.is_none() => Ok(SlashCommand::Compact),
         _ => bail!("Unknown command '{command}'. Use /help for available commands"),
     }
 }
@@ -82,7 +85,8 @@ mod tests {
                 "/resume",
                 "/login",
                 "/help",
-                "/provider"
+                "/provider",
+                "/compact"
             ]
         );
         assert_eq!(suggestions("/rea"), vec!["/reasoning"]);
@@ -100,6 +104,7 @@ mod tests {
         );
         assert!(parse("/login --unknown").is_err());
         assert_eq!(parse("/provider")?, SlashCommand::Provider(None));
+        assert_eq!(parse("/compact")?, SlashCommand::Compact);
         assert_eq!(
             parse("/provider openai-codex")?,
             SlashCommand::Provider(Some("openai-codex".into()))

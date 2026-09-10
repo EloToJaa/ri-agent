@@ -398,6 +398,7 @@ impl App {
                 "/provider [openrouter|openai-codex] (new conversation) · /model [query] · /reasoning [effort] · /resume [id] · /login [--manual] · /help\n$skill-name invokes an installed skill; type $ then Tab to complete. @ selects a file.",
                 Color::Cyan,
             ),
+            SlashCommand::Compact => self.send(commands, Command::Compact)?,
         }
         Ok(())
     }

@@ -27,6 +27,7 @@ pub(crate) enum Command {
     ListSessions,
     Clear,
     Login { manual: bool },
+    Compact,
 }
 
 enum Outcome {
@@ -56,6 +57,13 @@ async fn execute(command: Command, session: &mut Session, base_url: &str) -> Res
     match command {
         Command::Submit(prompt, cancellation) => {
             session.submit_cancellable(prompt, &cancellation).await?;
+        }
+        Command::Compact => {
+            let stats = session.compact().await?;
+            return Ok(Outcome::Notice(format!(
+                "Context compacted: {} messages, approximately {} tokens.",
+                stats.messages, stats.approximate_tokens
+            )));
         }
         Command::Select(selection) => session.select(selection).await?,
         Command::Provider(id) => {

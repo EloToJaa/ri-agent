@@ -20,6 +20,12 @@ pub enum SubmitOutcome {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextStats {
+    pub messages: usize,
+    pub approximate_tokens: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Selection {
     pub model: String,
@@ -93,6 +99,61 @@ impl Session {
             model: self.config.model.clone(),
             reasoning_effort: self.config.reasoning_effort,
         }
+    }
+
+    pub fn context_stats(&self) -> ContextStats {
+        ContextStats {
+            messages: self.messages.len(),
+            approximate_tokens: self
+                .messages
+                .iter()
+                .map(|message| {
+                    serde_json::to_string(message).map_or(0, |text| text.len().div_ceil(4))
+                })
+                .sum(),
+        }
+    }
+
+    pub async fn compact(&mut self) -> Result<ContextStats> {
+        const KEEP: usize = 6;
+        if self.messages.len() <= KEEP {
+            return Ok(self.context_stats());
+        }
+        let split = self.messages.len() - KEEP;
+        let summary = self.messages[..split]
+            .iter()
+            .filter_map(|message| match message {
+                Message::User { content } => Some(format!(
+                    "User: {}",
+                    content.chars().take(240).collect::<String>()
+                )),
+                Message::Assistant {
+                    content: Some(content),
+                    ..
+                } => Some(format!(
+                    "Assistant: {}",
+                    content.chars().take(240).collect::<String>()
+                )),
+                Message::Tool {
+                    tool_call_id,
+                    content,
+                } => Some(format!(
+                    "Tool {tool_call_id}: {}",
+                    content.chars().take(160).collect::<String>()
+                )),
+                Message::Assistant { content: None, .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.messages.drain(..split);
+        self.messages.insert(
+            0,
+            Message::User {
+                content: format!("[Conversation summary; older messages compacted]\n{summary}"),
+            },
+        );
+        self.checkpoint(false, self.messages.len()).await?;
+        Ok(self.context_stats())
     }
 
     pub async fn select(&mut self, selection: Selection) -> Result<()> {
@@ -600,6 +661,23 @@ mod tests {
         assert_eq!(session.provider().id(), "openrouter");
         assert_eq!(session.history().len(), 1);
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compacts_old_messages_and_reports_bounded_context() -> Result<()> {
+        let mut session = Session::new(
+            Arc::new(MockProvider("openrouter")),
+            AgentConfig { model: "mock".into(), reasoning_effort: None, max_turns: NonZeroUsize::MIN, limits: Limits::default(), lua: LuaConfig::from_source("return {}", "test")? },
+            Output::default(),
+        );
+        for index in 0..10 { session.messages.push(Message::User { content: format!("message {index}") }); }
+        let before = session.context_stats();
+        let after = session.compact().await?;
+        assert_eq!(before.messages, 10);
+        assert_eq!(after.messages, 7);
+        assert!(matches!(session.messages.first(), Some(Message::User { content }) if content.contains("message 0")));
+        assert!(matches!(session.messages.last(), Some(Message::User { content }) if content == "message 9"));
         Ok(())
     }
 }
