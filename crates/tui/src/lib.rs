@@ -28,6 +28,7 @@ pub(crate) enum Command {
     Clear,
     Login { manual: bool },
     Compact,
+    Fork,
 }
 
 enum Outcome {
@@ -63,6 +64,12 @@ async fn execute(command: Command, session: &mut Session, base_url: &str) -> Res
             return Ok(Outcome::Notice(format!(
                 "Context compacted: {} messages, approximately {} tokens.",
                 stats.messages, stats.approximate_tokens
+            )));
+        }
+        Command::Fork => {
+            let parent = session.fork().await?;
+            return Ok(Outcome::Notice(format!(
+                "Forked session {parent}; continuing in a new session."
             )));
         }
         Command::Select(selection) => session.select(selection).await?,

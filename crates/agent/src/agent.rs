@@ -156,6 +156,16 @@ impl Session {
         Ok(self.context_stats())
     }
 
+    /// Save the current checkpoint and continue from it under a new session ID.
+    pub async fn fork(&mut self) -> Result<String> {
+        self.checkpoint(false, self.messages.len()).await?;
+        let parent = self.id.clone();
+        self.id = uuid::Uuid::new_v4().to_string();
+        self.revision = 0;
+        self.checkpoint(false, self.messages.len()).await?;
+        Ok(parent)
+    }
+
     pub async fn select(&mut self, selection: Selection) -> Result<()> {
         let previous_selection = self.selection();
         let previous_messages = self.messages.clone();
@@ -668,16 +678,60 @@ mod tests {
     async fn compacts_old_messages_and_reports_bounded_context() -> Result<()> {
         let mut session = Session::new(
             Arc::new(MockProvider("openrouter")),
-            AgentConfig { model: "mock".into(), reasoning_effort: None, max_turns: NonZeroUsize::MIN, limits: Limits::default(), lua: LuaConfig::from_source("return {}", "test")? },
+            AgentConfig {
+                model: "mock".into(),
+                reasoning_effort: None,
+                max_turns: NonZeroUsize::MIN,
+                limits: Limits::default(),
+                lua: LuaConfig::from_source("return {}", "test")?,
+            },
             Output::default(),
         );
-        for index in 0..10 { session.messages.push(Message::User { content: format!("message {index}") }); }
+        for index in 0..10 {
+            session.messages.push(Message::User {
+                content: format!("message {index}"),
+            });
+        }
         let before = session.context_stats();
         let after = session.compact().await?;
         assert_eq!(before.messages, 10);
         assert_eq!(after.messages, 7);
-        assert!(matches!(session.messages.first(), Some(Message::User { content }) if content.contains("message 0")));
-        assert!(matches!(session.messages.last(), Some(Message::User { content }) if content == "message 9"));
+        assert!(
+            matches!(session.messages.first(), Some(Message::User { content }) if content.contains("message 0"))
+        );
+        assert!(
+            matches!(session.messages.last(), Some(Message::User { content }) if content == "message 9")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn forks_saved_history_under_a_new_id() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = SessionStore::open(root.path().join("sessions.sqlite3"), root.path())?;
+        let mut session = Session::new(
+            Arc::new(MockProvider("openrouter")),
+            AgentConfig {
+                model: "mock".into(),
+                reasoning_effort: None,
+                max_turns: NonZeroUsize::MIN,
+                limits: Limits::default(),
+                lua: LuaConfig::from_source("return {}", "test")?,
+            },
+            Output::default(),
+        )
+        .with_store(store.clone());
+        session.messages.push(Message::User {
+            content: "shared context".into(),
+        });
+        let original = session.id().to_owned();
+        let parent = session.fork().await?;
+        assert_eq!(parent, original);
+        assert_ne!(session.id(), original);
+        assert_eq!(session.history().len(), 1);
+        assert_eq!(store.list().await?.len(), 2);
+        assert_eq!(store.load(original).await?.messages.len(), 1);
+        assert_eq!(store.load(session.id().to_owned()).await?.messages.len(), 1);
         Ok(())
     }
 }

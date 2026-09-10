@@ -399,6 +399,7 @@ impl App {
                 Color::Cyan,
             ),
             SlashCommand::Compact => self.send(commands, Command::Compact)?,
+            SlashCommand::Fork => self.send(commands, Command::Fork)?,
         }
         Ok(())
     }
