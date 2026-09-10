@@ -52,6 +52,9 @@ struct Args {
     command_timeout: Option<NonZeroU64>,
     #[arg(long)]
     max_output_bytes: Option<NonZeroUsize>,
+    /// Auto-compact at this estimated history token count; 0 disables it.
+    #[arg(long, default_value_t = 32_000)]
+    auto_compact_tokens: usize,
     /// Resume a session ID, or the latest session in this directory when omitted.
     #[arg(long, num_args = 0..=1, default_missing_value = "latest", conflicts_with = "no_save")]
     resume: Option<String>,
@@ -181,7 +184,9 @@ async fn main() -> Result<()> {
     } else {
         Output::default()
     };
-    let mut session = Session::new(provider, config, output).with_skills(skills);
+    let mut session = Session::new(provider, config, output)
+        .with_skills(skills)
+        .with_auto_compact_tokens(NonZeroUsize::new(args.auto_compact_tokens));
     if !args.no_project_instructions {
         session = session.with_project_instructions(env::current_dir()?);
     }

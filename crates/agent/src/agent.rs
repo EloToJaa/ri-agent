@@ -62,6 +62,7 @@ pub struct AgentConfig {
 
 /// A conversation shared by the CLI and TUI frontends.
 pub struct Session {
+    auto_compact_tokens: Option<NonZeroUsize>,
     provider: Arc<dyn Provider>,
     config: AgentConfig,
     messages: Vec<Message>,
@@ -76,6 +77,7 @@ pub struct Session {
 impl Session {
     pub fn new(provider: Arc<dyn Provider>, config: AgentConfig, output: Output) -> Self {
         Self {
+            auto_compact_tokens: NonZeroUsize::new(32_000),
             provider,
             config,
             messages: Vec::new(),
@@ -86,6 +88,13 @@ impl Session {
             skills: crate::skills::Skills::default(),
             instruction_directory: None,
         }
+    }
+
+    /// Override the estimated history token threshold (default 32,000); None disables it.
+    #[must_use]
+    pub const fn with_auto_compact_tokens(mut self, threshold: Option<NonZeroUsize>) -> Self {
+        self.auto_compact_tokens = threshold;
+        self
     }
 
     #[must_use]
@@ -153,6 +162,41 @@ impl Session {
             return Err(error);
         }
         Ok(self.context_stats())
+    }
+
+    async fn auto_compact(&mut self, stable_len: &mut usize) -> Result<()> {
+        let before = self.context_stats().approximate_tokens;
+        if self
+            .auto_compact_tokens
+            .is_none_or(|threshold| before < threshold.get())
+        {
+            return Ok(());
+        }
+        let Some(compacted) = crate::compaction::compact(&self.messages) else {
+            return Ok(());
+        };
+        let removed = self.messages.len() - compacted.len();
+        // Never summarize the active turn: rollback and interrupted-session recovery
+        // must retain an exact boundary between completed history and current work.
+        if removed + 1 > *stable_len {
+            return Ok(());
+        }
+        let previous = std::mem::replace(&mut self.messages, compacted);
+        let after = self.context_stats().approximate_tokens;
+        if after >= before {
+            self.messages = previous;
+            return Ok(());
+        }
+        let new_stable_len = *stable_len - removed;
+        if let Err(error) = self.checkpoint(true, new_stable_len).await {
+            self.messages = previous;
+            return Err(error);
+        }
+        *stable_len = new_stable_len;
+        self.output.emit(Event::Progress(format!(
+            "Automatically compacted context: approximately {before} → {after} tokens"
+        )));
+        Ok(())
     }
 
     /// Save the current checkpoint and continue from it under a new session ID.
@@ -299,8 +343,8 @@ impl Session {
         prompt: String,
         cancellation: &crate::cancellation::Cancellation,
     ) -> Result<SubmitOutcome> {
-        let length = self.messages.len();
-        let result = self.run_turn(prompt, length, cancellation).await;
+        let mut length = self.messages.len();
+        let result = self.run_turn(prompt, &mut length, cancellation).await;
         if result.is_err() {
             self.output.emit(Event::AssistantAborted);
             self.messages.truncate(length);
@@ -323,7 +367,7 @@ impl Session {
     async fn run_turn(
         &mut self,
         prompt: String,
-        stable_len: usize,
+        stable_len: &mut usize,
         cancellation: &crate::cancellation::Cancellation,
     ) -> Result<SubmitOutcome> {
         if cancellation.is_cancelled() {
@@ -346,13 +390,17 @@ impl Session {
             return Ok(SubmitOutcome::Cancelled);
         }
         self.messages.push(Message::User { content: prompt });
-        self.checkpoint(true, stable_len).await?;
+        self.checkpoint(true, *stable_len).await?;
         let mut definitions = tools::definitions()
             .into_iter()
             .map(serde_json::to_value)
             .collect::<std::result::Result<Vec<_>, _>>()?;
         definitions.extend(self.config.lua.definitions.iter().cloned());
         for turn in 0..self.config.max_turns.get() {
+            if cancellation.is_cancelled() {
+                return Ok(SubmitOutcome::Cancelled);
+            }
+            self.auto_compact(stable_len).await?;
             self.output.emit(Event::Progress(format!(
                 "Requesting model response ({}/{})...",
                 turn + 1,
@@ -386,7 +434,7 @@ impl Session {
             if outcome == TurnOutcome::Cancelled {
                 return Ok(SubmitOutcome::Cancelled);
             }
-            self.checkpoint(true, stable_len).await?;
+            self.checkpoint(true, *stable_len).await?;
             if cancellation.is_cancelled() {
                 return Ok(SubmitOutcome::Cancelled);
             }
@@ -820,6 +868,109 @@ mod tests {
         assert!(
             matches!(session.messages.last(), Some(Message::User { content }) if content == "message 9")
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn auto_compaction_respects_threshold_and_preserves_recovery_boundary() -> Result<()> {
+        for threshold in [None, NonZeroUsize::new(1), NonZeroUsize::new(1_000_000)] {
+            let root = tempfile::tempdir()?;
+            let store = SessionStore::open(root.path().join("sessions.sqlite3"), root.path())?;
+            let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+            let mut session = cancellation_session(
+                Arc::new(MockProvider("openrouter")),
+                Output::channel(sender),
+            )?
+            .with_store(store.clone())
+            .with_auto_compact_tokens(threshold);
+            session.messages = vec![
+                Message::User {
+                    content: "old context ".repeat(1000)
+                };
+                10
+            ];
+            let mut stable = session.messages.len();
+            session.messages.push(Message::User {
+                content: "active task".into(),
+            });
+            session.auto_compact(&mut stable).await?;
+            let enabled = threshold == NonZeroUsize::new(1);
+            assert_eq!(session.messages.len(), if enabled { 7 } else { 11 });
+            assert_eq!(stable, session.messages.len() - 1);
+            assert!(
+                matches!(session.messages.last(), Some(Message::User { content }) if content == "active task")
+            );
+            assert_eq!(events.try_recv().is_ok(), enabled);
+            if enabled {
+                let saved = store.load(session.id.clone()).await?;
+                assert!(saved.interrupted);
+                assert_eq!(saved.stable_len, stable);
+                let mut restored =
+                    cancellation_session(Arc::new(MockProvider("openrouter")), Output::default())?
+                        .with_store(store.clone());
+                assert!(restored.resume(&session.id).await?);
+                assert_eq!(restored.messages.len(), stable);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn auto_compaction_skips_size_increases_and_active_turn_boundaries() -> Result<()> {
+        for (content, initial_stable) in [("x".into(), 8), ("large".repeat(1000), 0)] {
+            let mut session =
+                cancellation_session(Arc::new(MockProvider("openrouter")), Output::default())?
+                    .with_auto_compact_tokens(NonZeroUsize::new(1));
+            session.messages = vec![Message::User { content }; 8];
+            let before = serde_json::to_value(&session.messages)?;
+            let mut stable = initial_stable;
+            session.auto_compact(&mut stable).await?;
+            assert_eq!(serde_json::to_value(&session.messages)?, before);
+            assert_eq!(stable, initial_stable);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn model_failure_after_auto_compaction_rolls_back_only_active_turn() -> Result<()> {
+        let mut session =
+            cancellation_session(Arc::new(MockProvider("openrouter")), Output::default())?
+                .with_auto_compact_tokens(NonZeroUsize::new(1));
+        session.messages = vec![
+            Message::User {
+                content: "old context ".repeat(1000)
+            };
+            10
+        ];
+        assert!(session.submit("active task".into()).await.is_err());
+        assert_eq!(session.messages.len(), 6);
+        assert!(!session.messages.iter().any(
+            |message| matches!(message, Message::User { content } if content == "active task")
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn auto_compaction_save_failure_preserves_history_and_boundary() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = SessionStore::open(root.path().join("sessions.sqlite3"), root.path())?;
+        let mut session =
+            cancellation_session(Arc::new(MockProvider("openrouter")), Output::default())?
+                .with_store(store.clone())
+                .with_auto_compact_tokens(NonZeroUsize::new(1));
+        session.messages = vec![
+            Message::User {
+                content: "old context ".repeat(1000)
+            };
+            10
+        ];
+        let mut stable = session.messages.len();
+        session.checkpoint(false, stable).await?;
+        store.save(store.load(session.id.clone()).await?).await?;
+        let original = serde_json::to_value(&session.messages)?;
+        assert!(session.auto_compact(&mut stable).await.is_err());
+        assert_eq!(stable, 10);
+        assert_eq!(serde_json::to_value(&session.messages)?, original);
         Ok(())
     }
 
