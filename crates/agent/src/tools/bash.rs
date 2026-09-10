@@ -121,6 +121,7 @@ mod tests {
             command_timeout: std::time::Duration::from_millis(50),
             max_output_bytes: std::num::NonZeroUsize::MIN.saturating_add(2),
             read_only: false,
+            ask: false,
         };
         let error = Bash
             .execute(r#"{"command":"exec sleep 5"}"#, limits)

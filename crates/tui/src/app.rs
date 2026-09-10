@@ -60,6 +60,7 @@ pub struct App {
     streaming: String,
     cancellation: Option<ri_agent::cancellation::Cancellation>,
     pending: Option<String>,
+    approval: Option<ri_agent::events::ApprovalRequest>,
     status: String,
     busy: bool,
     scroll_back: u16,
@@ -84,6 +85,7 @@ impl App {
             streaming: String::new(),
             cancellation: None,
             pending: None,
+            approval: None,
             status: "Loading provider catalog…".into(),
             busy: false,
             scroll_back: 0,
@@ -97,7 +99,7 @@ impl App {
         };
         app.append(
             "HARNESS",
-            "Describe a task to begin. Tools run locally without approval.",
+            "Describe a task to begin. Tools run locally under the selected policy.",
             Color::Yellow,
         );
         for warning in &session.skills().warnings {
@@ -148,6 +150,14 @@ impl App {
 
     pub fn event(&mut self, event: Event) {
         match event {
+            Event::Approval(request) => {
+                self.picker = None;
+                self.file_search = None;
+                self.scroll_back = 0;
+                self.append("APPROVAL", &format!("{} ({})\n{}\nPress y to approve, n or Esc to deny. Scroll to review arguments.", request.tool.escape_debug(), request.id.escape_debug(), request.arguments.escape_debug()), WARNING);
+                self.status = "Approval required: y / n".into();
+                self.approval = Some(request);
+            }
             Event::User(text) => self.append("YOU", &text, ACCENT),
             Event::Assistant(text) => {
                 self.streaming.clear();
@@ -172,6 +182,7 @@ impl App {
     }
 
     pub fn finish(&mut self, result: Result<Outcome, String>) {
+        self.approval = None;
         self.busy = false;
         self.cancellation = None;
         self.status = "Ready".into();
@@ -444,6 +455,7 @@ impl App {
     }
 
     fn cancel_turn(&mut self) {
+        self.approval = None;
         self.restore_pending();
         if let Some(cancellation) = &self.cancellation {
             cancellation.cancel();
@@ -558,6 +570,25 @@ impl App {
         }
     }
 
+    fn approval_key(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Char('y' | 'n') | KeyCode::Esc => {
+                if let Some(request) = self.approval.take() {
+                    let approved = key == KeyCode::Char('y');
+                    let _ = request.response.send(approved);
+                    self.status = if approved { "Approved" } else { "Denied" }.into();
+                }
+            }
+            KeyCode::Up | KeyCode::PageUp => {
+                self.scroll_back = self.scroll_back.saturating_add(10);
+            }
+            KeyCode::Down | KeyCode::PageDown => {
+                self.scroll_back = self.scroll_back.saturating_sub(10);
+            }
+            _ => {}
+        }
+    }
+
     pub fn key(
         &mut self,
         key: KeyEvent,
@@ -571,6 +602,10 @@ impl App {
                 return Ok(false);
             }
             return Ok(true);
+        }
+        if self.approval.is_some() {
+            self.approval_key(key.code);
+            return Ok(false);
         }
         if let Some(picker) = &mut self.picker {
             if key.code == KeyCode::Esc {
@@ -642,6 +677,7 @@ impl App {
                             max_output_bytes: std::num::NonZeroUsize::MIN
                                 .saturating_add(1024 * 1024 - 1),
                             read_only: false,
+                            ask: false,
                         },
                     )
                     .await
@@ -919,7 +955,9 @@ impl App {
     }
 
     fn draw_composer(&self, frame: &mut Frame, area: Rect) {
-        let title = if self.busy {
+        let title = if self.approval.is_some() {
+            " APPROVAL · y allows · n/Esc denies · Ctrl+C stops "
+        } else if self.busy {
             " Enter steers · Esc/Ctrl+C stops "
         } else {
             " PROMPT · Enter sends · @ files · $ skills "
@@ -1015,6 +1053,31 @@ mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
     use ri_agent::{agent::AgentConfig, config::LuaConfig, events::Output, limits::Limits};
+
+    #[test]
+    fn approval_keys_preserve_the_draft() -> Result<()> {
+        for (key, approved) in [
+            (KeyCode::Char('y'), true),
+            (KeyCode::Char('n'), false),
+            (KeyCode::Esc, false),
+        ] {
+            let mut app = app()?;
+            app.input = "draft".into();
+            let (response, mut receiver) = tokio::sync::oneshot::channel();
+            app.event(Event::Approval(ri_agent::events::ApprovalRequest {
+                tool: "Bash".into(),
+                id: "call".into(),
+                arguments: "{}".into(),
+                response,
+            }));
+            let (sender, _) = mpsc::unbounded_channel();
+            app.key(KeyEvent::new(key, KeyModifiers::NONE), &sender)?;
+            assert_eq!(receiver.try_recv()?, approved);
+            assert_eq!(app.input, "draft");
+            assert!(app.approval.is_none());
+        }
+        Ok(())
+    }
 
     fn app() -> Result<App> {
         let session = Session::new(

@@ -57,6 +57,16 @@ pub async fn execute_batch_cancellable(
         if cancellation.is_cancelled() {
             return Ok(json!({"cancelled":true,"executed":false,"error":"Tool skipped because the user cancelled the turn"}).to_string());
         }
+        if limits.ask && !limits.read_only && !matches!(call.function.name.as_str(), "Read" | "Search" | "Find") {
+            let approved = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => false,
+                approved = output.approve(call) => approved,
+            };
+            if !approved || cancellation.is_cancelled() {
+                return Ok(json!({"executed":false,"cancelled":cancellation.is_cancelled(),"error":"Tool approval denied"}).to_string());
+            }
+        }
         // Do not drop an in-flight filesystem operation or trusted Lua callback.
         execute_with(call, limits, output, lua).await
     })
@@ -182,6 +192,76 @@ async fn execute_inner(call: &ToolCall, limits: Limits) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn approvals_control_writes_and_fail_closed() -> Result<()> {
+        use crate::{
+            cancellation::Cancellation,
+            events::{Event, Output},
+        };
+        for decision in ["approve", "deny", "drop", "cancel", "read_only"] {
+            let directory = tempfile::tempdir()?;
+            let path = directory.path().join("result");
+            let arguments = json!({"file_path": path, "content": "approved content"}).to_string();
+            let calls = [serde_json::from_value(
+                json!({"id":"write-1", "type":"function", "function":{"name":"Write", "arguments":arguments}}),
+            )?];
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let output = Output::channel(sender);
+            let cancellation = Cancellation::default();
+            let limits = Limits {
+                ask: true,
+                read_only: decision == "read_only",
+                ..Limits::default()
+            };
+            let work = execute_batch_cancellable(&calls, limits, &output, None, &cancellation);
+            let respond = async {
+                if decision == "read_only" {
+                    return Ok::<_, anyhow::Error>(());
+                }
+                let Some(Event::Approval(request)) = receiver.recv().await else {
+                    bail!("missing approval");
+                };
+                assert_eq!(request.tool, "Write");
+                assert_eq!(request.id, "write-1");
+                assert_eq!(request.arguments, arguments);
+                match decision {
+                    "approve" => {
+                        assert!(request.response.send(true).is_ok());
+                    }
+                    "deny" => {
+                        assert!(request.response.send(false).is_ok());
+                    }
+                    "cancel" => {
+                        cancellation.cancel();
+                        assert!(request.response.send(true).is_ok());
+                    }
+                    _ => drop(request),
+                }
+                Ok(())
+            };
+            let (results, response) = Box::pin(tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                async { tokio::join!(work, respond) },
+            ))
+            .await?;
+            response?;
+            assert_eq!(
+                path.exists(),
+                decision == "approve",
+                "{decision}: {results:?}"
+            );
+            if decision == "approve" {
+                assert_eq!(std::fs::read_to_string(path)?, "approved content");
+            }
+            if decision == "read_only" {
+                while let Ok(event) = receiver.try_recv() {
+                    assert!(!matches!(event, Event::Approval(_)));
+                }
+            }
+        }
+        Ok(())
+    }
 
     #[tokio::test]
     async fn overlaps_reads_with_a_bound_and_serializes_mutations() -> Result<()> {

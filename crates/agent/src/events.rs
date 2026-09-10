@@ -6,6 +6,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug)]
 pub enum Event {
+    Approval(ApprovalRequest),
     User(String),
     Progress(String),
     Assistant(String),
@@ -13,6 +14,14 @@ pub enum Event {
     AssistantDelta(String),
     AssistantAborted,
     Tool(String),
+}
+
+#[derive(Debug)]
+pub struct ApprovalRequest {
+    pub tool: String,
+    pub id: String,
+    pub arguments: String,
+    pub response: tokio::sync::oneshot::Sender<bool>,
 }
 
 #[derive(Clone, Default)]
@@ -23,6 +32,40 @@ pub struct Output {
 }
 
 impl Output {
+    pub async fn approve(&self, call: &crate::response::ToolCall) -> bool {
+        let (response, receiver) = tokio::sync::oneshot::channel();
+        let request = ApprovalRequest {
+            tool: call.function.name.clone(),
+            id: call.id.clone(),
+            arguments: call.function.arguments.clone().unwrap_or_default(),
+            response,
+        };
+        if let Some(sender) = &self.sender {
+            if sender.send(Event::Approval(request)).is_err() {
+                return false;
+            }
+            return receiver.await.unwrap_or(false);
+        }
+        tokio::task::spawn_blocking(move || {
+            use std::io::IsTerminal as _;
+            if !std::io::stdin().is_terminal() {
+                eprintln!("Approval denied: stdin is not a terminal");
+                return false;
+            }
+            eprintln!(
+                "Approve {} ({})? Arguments: {}",
+                request.tool.escape_debug(),
+                request.id.escape_debug(),
+                request.arguments.escape_debug()
+            );
+            eprint!("Type yes to execute: ");
+            let _ = std::io::stderr().flush();
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer).is_ok() && answer.trim() == "yes"
+        })
+        .await
+        .unwrap_or(false)
+    }
     pub fn json() -> Self {
         Self {
             json: true,
@@ -43,6 +86,7 @@ impl Output {
         }
         if self.json {
             let value = match event {
+                Event::Approval(_) => return,
                 Event::User(text) => serde_json::json!({"type":"user","text":text}),
                 Event::Progress(text) => serde_json::json!({"type":"progress","text":text}),
                 Event::Assistant(text) => serde_json::json!({"type":"assistant","text":text}),
@@ -88,7 +132,7 @@ impl Output {
                 }
                 streamed.clear();
             }
-            Event::Tool(_) | Event::User(_) => {}
+            Event::Approval(_) | Event::Tool(_) | Event::User(_) => {}
         }
     }
 }

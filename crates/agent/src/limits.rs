@@ -9,6 +9,7 @@ pub struct Limits {
     pub command_timeout: std::time::Duration,
     pub max_output_bytes: NonZeroUsize,
     pub read_only: bool,
+    pub ask: bool,
 }
 
 impl Default for Limits {
@@ -17,6 +18,7 @@ impl Default for Limits {
             command_timeout: std::time::Duration::from_mins(1),
             max_output_bytes: NonZeroUsize::MIN.saturating_add(32 * 1024 - 1),
             read_only: false,
+            ask: false,
         }
     }
 }

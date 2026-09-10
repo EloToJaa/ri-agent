@@ -4,6 +4,8 @@ An asynchronous Rust agent harness with a Ratatui terminal interface, a one-shot
 
 ## Getting started
 
+Use `ri --ask` to approve each Write, Edit, Bash, or custom tool call. The TUI shows the arguments and accepts `y` to approve or `n`/Escape to deny; arrow/Page keys scroll the transcript and Ctrl+C cancels the turn. The one-shot CLI requires terminal stdin and the exact answer `yes`, with prompts on stderr (including under `--json`). Non-terminal input and disconnected approval responders deny execution. Read, Search, and Find do not require approval. `--read-only` takes precedence over `--ask`. These policies govern tool calls; trusted Lua configuration and hooks still run locally.
+
 With Nix, launch the packaged TUI directly (no development shell needed):
 
 ```sh

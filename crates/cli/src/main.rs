@@ -70,6 +70,9 @@ struct Args {
     /// Block Bash, Write, Edit, and custom tools for this invocation.
     #[arg(long)]
     read_only: bool,
+    /// Ask before Bash, Write, Edit, and custom tool calls (requires a terminal).
+    #[arg(long)]
+    ask: bool,
     /// Disable automatic AGENTS.md discovery for this invocation.
     #[arg(long)]
     no_project_instructions: bool,
@@ -162,6 +165,7 @@ async fn main() -> Result<()> {
                 .or(settings.max_output_bytes)
                 .unwrap_or_else(|| limits::Limits::default().max_output_bytes),
             read_only: args.read_only,
+            ask: args.ask,
         },
         lua,
     };
