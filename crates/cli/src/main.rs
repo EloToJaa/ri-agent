@@ -23,6 +23,7 @@ use std::{
     version,
     about = "OpenRouter agent harness with Lua configuration and a Ratatui interface"
 )]
+#[allow(clippy::struct_excessive_bools)]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
@@ -63,6 +64,9 @@ struct Args {
     /// Do not save conversation or tool results to disk.
     #[arg(long)]
     no_save: bool,
+    /// Emit newline-delimited JSON events instead of human-readable output.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(clap::Subcommand)]
@@ -161,7 +165,12 @@ async fn main() -> Result<()> {
     for warning in &skills.warnings {
         eprintln!("Skill warning: {warning}");
     }
-    let mut session = Session::new(provider, config, Output::default()).with_skills(skills);
+    let output = if args.json {
+        Output::json()
+    } else {
+        Output::default()
+    };
+    let mut session = Session::new(provider, config, output).with_skills(skills);
     if let Some(store) = store {
         session = session.with_store(store);
     }

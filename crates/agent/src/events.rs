@@ -19,9 +19,16 @@ pub enum Event {
 pub struct Output {
     sender: Option<UnboundedSender<Event>>,
     streamed: Arc<Mutex<String>>,
+    json: bool,
 }
 
 impl Output {
+    pub fn json() -> Self {
+        Self {
+            json: true,
+            ..Self::default()
+        }
+    }
     pub fn channel(sender: UnboundedSender<Event>) -> Self {
         Self {
             sender: Some(sender),
@@ -32,6 +39,20 @@ impl Output {
     pub fn emit(&self, event: Event) {
         if let Some(sender) = &self.sender {
             let _ = sender.send(event);
+            return;
+        }
+        if self.json {
+            let value = match event {
+                Event::User(text) => serde_json::json!({"type":"user","text":text}),
+                Event::Progress(text) => serde_json::json!({"type":"progress","text":text}),
+                Event::Assistant(text) => serde_json::json!({"type":"assistant","text":text}),
+                Event::AssistantDelta(text) => {
+                    serde_json::json!({"type":"assistant_delta","text":text})
+                }
+                Event::AssistantAborted => serde_json::json!({"type":"assistant_aborted"}),
+                Event::Tool(text) => serde_json::json!({"type":"tool","text":text}),
+            };
+            println!("{value}");
             return;
         }
         match event {

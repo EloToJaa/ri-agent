@@ -120,7 +120,10 @@ impl Session {
             return Ok(self.context_stats());
         }
         let split = self.messages.len() - KEEP;
-        let summary = self.messages[..split]
+        let summary = self
+            .messages
+            .get(..split)
+            .context("Invalid compaction boundary")?
             .iter()
             .filter_map(|message| match message {
                 Message::User { content } => Some(format!(
