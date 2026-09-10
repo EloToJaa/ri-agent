@@ -20,7 +20,7 @@ use std::io::{self, IsTerminal};
 use tokio::sync::mpsc;
 
 pub(crate) enum Command {
-    Submit(String),
+    Submit(String, ri_agent::cancellation::Cancellation),
     Select(Selection),
     Provider(String),
     Resume(String),
@@ -54,7 +54,9 @@ enum Outcome {
 
 async fn execute(command: Command, session: &mut Session, base_url: &str) -> Result<Outcome> {
     match command {
-        Command::Submit(prompt) => session.submit(prompt).await?,
+        Command::Submit(prompt, cancellation) => {
+            session.submit_cancellable(prompt, &cancellation).await?;
+        }
         Command::Select(selection) => session.select(selection).await?,
         Command::Provider(id) => {
             if id != session.provider().id() {
@@ -206,6 +208,7 @@ pub async fn run_with_base_url(
                         refresh.send(provider.clone()).context("Catalog worker stopped")?;
                     }
                     app.finish(result);
+                    app.continue_pending(&commands)?;
                 }
                 catalog = catalogs.recv() => {
                     let (id, result) = catalog.context("Catalog worker stopped")?;

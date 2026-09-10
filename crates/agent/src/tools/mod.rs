@@ -44,13 +44,22 @@ pub struct FunctionDefinition {
     parameters: Value,
 }
 
-pub async fn execute_batch(
+pub async fn execute_batch_cancellable(
     calls: &[ToolCall],
     limits: Limits,
     output: &crate::events::Output,
     lua: Option<&std::sync::Arc<crate::config::LuaConfig>>,
+    cancellation: &crate::cancellation::Cancellation,
 ) -> Vec<String> {
-    execute_batch_with(calls, |call| execute_with(call, limits, output, lua))
+    execute_batch_with(calls, |call| async move {
+        // Let the frontend process pending input at each tool boundary.
+        tokio::task::yield_now().await;
+        if cancellation.is_cancelled() {
+            return Ok(json!({"cancelled":true,"executed":false,"error":"Tool skipped because the user cancelled the turn"}).to_string());
+        }
+        // Do not drop an in-flight filesystem operation or trusted Lua callback.
+        execute_with(call, limits, output, lua).await
+    })
         .await
         .into_iter()
         .map(|result| {

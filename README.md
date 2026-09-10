@@ -38,7 +38,8 @@ The executable is named `ri`. `ri login` authenticates with OpenRouter; `ri logi
 
 The TUI uses a responsive agent-workbench layout: a provider/session rail, persistent model and reasoning state, a bordered transcript, an activity-aware composer, and searchable modal selectors. It keeps conversation history across prompts and shows assistant responses, tool results, and model/tool activity. OpenRouter and Codex response text streams into the transcript as it arrives; the one-shot CLI also streams to stdout. Completed text replaces the provisional TUI preview without duplication. Failed streams are marked as incomplete in the TUI and are not saved as completed responses. Tool calls execute only after the response completes successfully. OpenRouter-compatible endpoints that return JSON still work, with buffered output.
 
-- **Ctrl+D** or **Ctrl+C**: quit.
+- **Ctrl+D**: quit. **Ctrl+C** quits when idle; during a turn it requests cancellation and keeps the TUI open.
+- **Esc**: cancel the active turn when no picker or completion is open. Pickers and completions consume Esc first. Cancellation stops model requests immediately; active local tools and Lua hooks finish before the turn stops, and remaining tools are skipped. Bash still uses its configured timeout; a blocked Lua callback can delay cancellation. Applied changes are retained.
 - **F2**: search the active provider’s live model catalog. Switching models resets the reasoning override and removes old model-specific reasoning metadata, but preserves conversation text and tool results.
 - **F3**: select reasoning effort or **Provider default**. Choices follow the selected model’s `reasoning.supported_efforts`; mandatory reasoning models never offer `none`. Missing capability metadata only offers provider defaults, with a label explaining whether the catalog is loading/unavailable, the selected model is absent, or effort levels are not advertised. An open picker refreshes when the catalog arrives.
 - **F4**: search and resume saved sessions for this working directory. Modal selectors support wrapping Up/Down navigation, Page Up/Page Down jumps, filtering, match counts, and clear empty states.
@@ -47,13 +48,15 @@ The TUI uses a responsive agent-workbench layout: a provider/session rail, persi
 - **F5**: refresh the catalog after a network error. The configured model still works without a catalog when using provider-default reasoning.
 - **$skill-name** at the start of a prompt or after whitespace: autocomplete installed skills inline, like slash commands. Up/Down selects, Tab completes, Enter completes a partial name or submits an exact name, and Esc cancels the current completion. Skill instructions are loaded on submission; you can combine skills and text, e.g. `$review focus on persistence` or `Check this change with $test`.
 - **@** at the start of a prompt or after whitespace: open a searchable file picker backed by `fd` in the current working directory. Type or paste to filter, use Up/Down to select, Enter to insert a reference such as `@src/main.rs` (no quotes or leading `./`; spaces and backslashes are escaped), and Esc to cancel. Selection inserts a path, not file contents; the agent can use Read to inspect it. Discovery respects ignore files and excludes hidden files, runs asynchronously with a 10-second timeout, and retains at most 1 MiB of paths (with a truncation notice).
-- **Enter**: send a prompt when idle. You can draft the next prompt while the agent works. Model, reasoning, and session changes are only available when idle.
+- **Enter**: send a prompt when idle. During a turn, send a correction by pressing Enter: this requests cancellation and queues one correction to run after the current turn is saved. Further drafts remain in the composer while that correction is queued. Ctrl+C/Esc restores a queued correction to the draft instead of sending it. A turn or persistence error also keeps the correction in the draft. Model, reasoning, and session changes are only available when idle.
 - **Backspace**: delete the last character/grapheme.
 - **Page Up / Page Down**: scroll the transcript.
 - **Ctrl+L**: start a new conversation when idle.
-Quitting drops the active agent turn; the SQLite checkpoint remains resumable and local tool effects already applied remain. Already-applied tool effects remain.
+Quitting drops the active agent turn; the SQLite checkpoint remains resumable and local tool effects already applied remain.
 
 The visible transcript retains up to 4,000 lines; model conversation history remains intact until cleared. Failed turns are removed from model history, without undoing local tool effects. The TUI requires a terminal; use `-p` for scripts and pipes.
+
+Orderly cancellation preserves the submitted prompt, completed responses and tool results, explicit `executed=false` results for skipped calls, and a harness cancellation notice. Partial streamed text stays visibly incomplete and is excluded from model history. The saved conversation can be resumed without replaying tools. This differs from abruptly quitting or crashing, which restores the last completed prompt as described below.
 
 ## SQLite sessions
 
@@ -178,6 +181,8 @@ The root Cargo manifest is workspace-only. `crates/agent/src/providers/openroute
 The main library re-exports the Lua crate as `ri_agent::config`. Frontends use `Session` and an event channel (`Output::channel`); `Output::default` writes CLI output. Sessions own conversation history and expose `submit` and `clear`.
 
 `Provider::complete_stream` emits provisional `Event::AssistantDelta` text and returns the complete response; its default implementation delegates to `complete` for existing providers. `Event::Assistant` is authoritative and replaces any preview; `Event::AssistantAborted` marks an unfinished preview. Only complete messages enter conversation history. The shared SSE reader handles fragmented UTF-8, CR/LF framing, multiline data, and keepalive comments, with an 8 MiB per-event limit. Missing completion markers and provider error events fail the turn without executing pending tools. Protocol references: [OpenAI streaming responses](https://developers.openai.com/api/docs/guides/streaming-responses) and [OpenRouter reasoning details](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens).
+
+Library frontends can call `Session::submit_cancellable(prompt, &cancellation)` and retain a clone of `cancellation::Cancellation` to request a stop. Create a fresh signal for every turn; signals are never reset. The call returns `SubmitOutcome::Completed` or `SubmitOutcome::Cancelled` after saving, or an error if the turn/checkpoint fails. Existing `Session::submit` behavior is unchanged.
 
 ## Development
 

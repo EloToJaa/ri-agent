@@ -12,6 +12,14 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::{num::NonZeroUsize, sync::Arc};
 
+const CANCELLED_NOTICE: &str = "[Harness notice: the user cancelled this turn. Completed tool effects remain; tools marked executed=false were skipped. Follow the user's next instructions.]";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubmitOutcome {
+    Completed,
+    Cancelled,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Selection {
     pub model: String,
@@ -167,6 +175,9 @@ impl Session {
         self.messages
             .iter()
             .filter_map(|message| match message {
+                Message::User { content } if content == CANCELLED_NOTICE => {
+                    Some(Event::Progress(content.clone()))
+                }
                 Message::User { content } => Some(Event::User(content.clone())),
                 Message::Assistant {
                     content: Some(content),
@@ -206,19 +217,53 @@ impl Session {
 
     /// Failed turns are removed from history; local tool side effects are not undone.
     pub async fn submit(&mut self, prompt: String) -> Result<()> {
+        self.submit_cancellable(prompt, &crate::cancellation::Cancellation::default())
+            .await
+            .map(|_| ())
+    }
+
+    /// Cancel model requests immediately, but finish active tools/hooks before saving.
+    /// Successful tool results and explicit skipped results survive orderly cancellation.
+    pub async fn submit_cancellable(
+        &mut self,
+        prompt: String,
+        cancellation: &crate::cancellation::Cancellation,
+    ) -> Result<SubmitOutcome> {
         let length = self.messages.len();
-        let result = self.run_turn(prompt, length).await;
+        let result = self.run_turn(prompt, length, cancellation).await;
         if result.is_err() {
             self.output.emit(Event::AssistantAborted);
             self.messages.truncate(length);
         }
+        if matches!(result, Ok(SubmitOutcome::Cancelled)) {
+            self.output.emit(Event::AssistantAborted);
+            if self.messages.len() > length {
+                self.messages.push(Message::User {
+                    content: CANCELLED_NOTICE.into(),
+                });
+            }
+        }
         self.checkpoint(false, self.messages.len()).await?;
+        if matches!(result, Ok(SubmitOutcome::Cancelled)) {
+            self.output.emit(Event::Progress("Turn cancelled. Completed tool effects and results were retained; pending tools were skipped.".into()));
+        }
         result
     }
 
-    async fn run_turn(&mut self, prompt: String, stable_len: usize) -> Result<()> {
+    async fn run_turn(
+        &mut self,
+        prompt: String,
+        stable_len: usize,
+        cancellation: &crate::cancellation::Cancellation,
+    ) -> Result<SubmitOutcome> {
+        if cancellation.is_cancelled() {
+            return Ok(SubmitOutcome::Cancelled);
+        }
         let prompt = self.skills.expand(prompt).await?;
         let prompt = self.config.lua.hook("before_prompt", prompt).await?;
+        if cancellation.is_cancelled() {
+            return Ok(SubmitOutcome::Cancelled);
+        }
         self.messages.push(Message::User { content: prompt });
         self.checkpoint(true, stable_len).await?;
         let mut definitions = tools::definitions()
@@ -239,23 +284,36 @@ impl Session {
                 reasoning_effort: self.config.reasoning_effort,
             };
             // Hooks transform complete text. Do not display untransformed deltas.
-            let response = if self.config.lua.has_after_response_hook {
-                self.provider.complete(request).await
-            } else {
-                self.provider.complete_stream(request, &self.output).await
+            let response = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Ok(SubmitOutcome::Cancelled),
+                response = async {
+                    if self.config.lua.has_after_response_hook {
+                        self.provider.complete(request).await
+                    } else {
+                        self.provider.complete_stream(request, &self.output).await
+                    }
+                } => response,
             }
             .with_context(|| {
                 format!("Failed to request {} model response", self.provider.name())
             })?;
             let outcome = ResponseProcessor::new(response)
+                .with_cancellation(cancellation.clone())
                 .with_limits(self.config.limits)
                 .with_runtime(self.output.clone(), Arc::clone(&self.config.lua))
                 .process(&mut self.messages)
                 .await?;
             if outcome == TurnOutcome::Finished {
-                return Ok(());
+                return Ok(SubmitOutcome::Completed);
+            }
+            if outcome == TurnOutcome::Cancelled {
+                return Ok(SubmitOutcome::Cancelled);
             }
             self.checkpoint(true, stable_len).await?;
+            if cancellation.is_cancelled() {
+                return Ok(SubmitOutcome::Cancelled);
+            }
         }
         bail!("Maximum model turns ({}) reached", self.config.max_turns)
     }
@@ -280,6 +338,202 @@ mod tests {
         fn complete<'a>(&'a self, _: CompletionRequest<'a>) -> ProviderFuture<'a, Completion> {
             Box::pin(async { bail!("Unexpected completion") })
         }
+    }
+
+    struct CancellationProvider {
+        requests: std::sync::Mutex<Vec<Vec<Message>>>,
+        first: serde_json::Value,
+        pending: bool,
+    }
+
+    impl Provider for CancellationProvider {
+        fn id(&self) -> &'static str {
+            "mock"
+        }
+        fn name(&self) -> &'static str {
+            "Mock"
+        }
+        fn models(&self) -> ProviderFuture<'_, Vec<Model>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+        fn complete<'a>(
+            &'a self,
+            request: CompletionRequest<'a>,
+        ) -> ProviderFuture<'a, Completion> {
+            Box::pin(async move {
+                let mut requests = self
+                    .requests
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("Poisoned requests"))?;
+                requests.push(request.messages.to_vec());
+                let response = if requests.len() == 1 {
+                    self.first.clone()
+                } else {
+                    serde_json::json!({"content":"Corrected"})
+                };
+                drop(requests);
+                Ok(serde_json::from_value(response)?)
+            })
+        }
+        fn complete_stream<'a>(
+            &'a self,
+            request: CompletionRequest<'a>,
+            output: &'a Output,
+        ) -> ProviderFuture<'a, Completion> {
+            Box::pin(async move {
+                if self.pending {
+                    output.emit(Event::AssistantDelta("partial text".into()));
+                    return std::future::pending().await;
+                }
+                self.complete(request).await
+            })
+        }
+    }
+
+    fn cancellation_session(provider: Arc<dyn Provider>, output: Output) -> Result<Session> {
+        Ok(Session::new(
+            provider,
+            AgentConfig {
+                model: "mock".into(),
+                reasoning_effort: None,
+                max_turns: NonZeroUsize::MIN.saturating_add(2),
+                limits: Limits::default(),
+                lua: LuaConfig::from_source("return {}", "test")?,
+            },
+            output,
+        ))
+    }
+
+    #[tokio::test]
+    async fn cancels_a_pending_model_request_without_committing_partial_text() -> Result<()> {
+        let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let provider = Arc::new(CancellationProvider {
+            requests: std::sync::Mutex::default(),
+            first: serde_json::Value::Null,
+            pending: true,
+        });
+        let mut session = cancellation_session(provider, Output::channel(sender))?;
+        let cancellation = crate::cancellation::Cancellation::default();
+        let cancel = async {
+            while let Some(event) = events.recv().await {
+                if matches!(event, Event::AssistantDelta(_)) {
+                    cancellation.cancel();
+                    return;
+                }
+            }
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(
+                session.submit_cancellable("start".into(), &cancellation),
+                cancel
+            )
+        })
+        .await?;
+        assert_eq!(result?, SubmitOutcome::Cancelled);
+        assert_eq!(session.messages.len(), 2);
+        assert!(
+            !session
+                .messages
+                .iter()
+                .any(|message| matches!(message, Message::Assistant { .. }))
+        );
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok())
+                .any(|event| matches!(event, Event::AssistantAborted))
+        );
+        let fresh = crate::cancellation::Cancellation::default();
+        assert!(!fresh.is_cancelled());
+        let length = session.messages.len();
+        assert_eq!(
+            session
+                .submit_cancellable("already cancelled".into(), &cancellation)
+                .await?,
+            SubmitOutcome::Cancelled
+        );
+        assert_eq!(session.messages.len(), length);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancellation_finishes_active_tools_skips_pending_tools_and_resumes_without_replay()
+    -> Result<()> {
+        use serde_json::json;
+        let directory = tempfile::tempdir()?;
+        let kept = directory.path().join("kept");
+        let skipped = directory.path().join("skipped");
+        let call = |id: &str, name: &str, args: serde_json::Value| json!({"id":id,"type":"function","function":{"name":name,"arguments":args.to_string()}});
+        let provider = Arc::new(CancellationProvider {
+            requests: std::sync::Mutex::default(),
+            pending: false,
+            first: json!({"tool_calls":[
+                call("kept", "Write", json!({"file_path":kept,"content":"retained"})),
+                call("active", "Bash", json!({"command":"exec sleep 0.05"})),
+                call("skipped", "Write", json!({"file_path":skipped,"content":"must not exist"}))
+            ]}),
+        });
+        let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let store =
+            SessionStore::open(directory.path().join("sessions.sqlite3"), directory.path())?;
+        let mut session = cancellation_session(provider.clone(), Output::channel(sender))?
+            .with_store(store.clone());
+        let cancellation = crate::cancellation::Cancellation::default();
+        let cancel = async {
+            while let Some(event) = events.recv().await {
+                if matches!(event, Event::Progress(text) if text.starts_with("Running Bash")) {
+                    cancellation.cancel();
+                    return;
+                }
+            }
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            tokio::join!(
+                session.submit_cancellable("start".into(), &cancellation),
+                cancel
+            )
+        })
+        .await?;
+        assert_eq!(result?, SubmitOutcome::Cancelled);
+        assert_eq!(tokio::fs::read_to_string(&kept).await?, "retained");
+        assert!(!skipped.exists());
+        let saved = store.load(session.id().to_owned()).await?;
+        assert!(!saved.interrupted);
+        assert_eq!(saved.messages.len(), 6);
+        let results: Vec<_> = saved
+            .messages
+            .iter()
+            .filter_map(|message| {
+                if let Message::Tool {
+                    tool_call_id,
+                    content,
+                } = message
+                {
+                    Some((tool_call_id.as_str(), content.as_str()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(results.first().map(|result| result.0), Some("kept"));
+        let active: serde_json::Value =
+            serde_json::from_str(results.get(1).context("Missing active tool result")?.1)?;
+        assert_eq!(active.get("success"), Some(&json!(true)));
+        let skipped_result: serde_json::Value =
+            serde_json::from_str(results.get(2).context("Missing skipped result")?.1)?;
+        assert_eq!(skipped_result.get("executed"), Some(&json!(false)));
+        tokio::fs::remove_file(&kept).await?;
+        let id = session.id().to_owned();
+        assert!(!session.resume(&id).await?);
+        assert!(!kept.exists());
+        session.submit("correction".into()).await?;
+        assert!(!kept.exists());
+        let requests = provider
+            .requests
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Poisoned requests"))?;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.get(1).context("Missing correction")?.len(), 7);
+        drop(requests);
+        Ok(())
     }
 
     #[tokio::test]

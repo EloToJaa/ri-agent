@@ -6,6 +6,7 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 pub enum TurnOutcome {
     Continue,
     Finished,
+    Cancelled,
 }
 
 pub struct ResponseProcessor {
@@ -13,9 +14,17 @@ pub struct ResponseProcessor {
     limits: crate::limits::Limits,
     output: crate::events::Output,
     lua: Option<std::sync::Arc<crate::config::LuaConfig>>,
+    cancellation: crate::cancellation::Cancellation,
 }
 
 impl ResponseProcessor {
+    pub(crate) fn with_cancellation(
+        mut self,
+        cancellation: crate::cancellation::Cancellation,
+    ) -> Self {
+        self.cancellation = cancellation;
+        self
+    }
     pub(crate) const fn with_limits(mut self, limits: crate::limits::Limits) -> Self {
         self.limits = limits;
         self
@@ -37,6 +46,7 @@ impl ResponseProcessor {
             limits: crate::limits::Limits::default(),
             output: crate::events::Output::default(),
             lua: None,
+            cancellation: crate::cancellation::Cancellation::default(),
         }
     }
 
@@ -53,6 +63,9 @@ impl ResponseProcessor {
             (Some(lua), Some(content)) => Some(lua.hook("after_response", content.clone()).await?),
             _ => self.response.content.clone(),
         };
+        if self.cancellation.is_cancelled() {
+            return Ok(TurnOutcome::Cancelled);
+        }
         if let Some(text) = &content {
             self.output
                 .emit(crate::events::Event::Assistant(text.clone()));
@@ -71,11 +84,12 @@ impl ResponseProcessor {
             return Ok(TurnOutcome::Finished);
         }
 
-        let results = tools::execute_batch(
+        let results = tools::execute_batch_cancellable(
             &self.response.tool_calls,
             self.limits,
             &self.output,
             self.lua.as_ref(),
+            &self.cancellation,
         )
         .await;
         for (call, contents) in self.response.tool_calls.iter().zip(results) {
@@ -89,7 +103,11 @@ impl ResponseProcessor {
             });
         }
 
-        Ok(TurnOutcome::Continue)
+        Ok(if self.cancellation.is_cancelled() {
+            TurnOutcome::Cancelled
+        } else {
+            TurnOutcome::Continue
+        })
     }
 }
 

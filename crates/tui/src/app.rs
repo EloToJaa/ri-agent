@@ -58,6 +58,8 @@ pub struct App {
     pub input: String,
     lines: VecDeque<Line<'static>>,
     streaming: String,
+    cancellation: Option<ri_agent::cancellation::Cancellation>,
+    pending: Option<String>,
     status: String,
     busy: bool,
     scroll_back: u16,
@@ -80,6 +82,8 @@ impl App {
             input: String::new(),
             lines: VecDeque::new(),
             streaming: String::new(),
+            cancellation: None,
+            pending: None,
             status: "Loading provider catalog…".into(),
             busy: false,
             scroll_back: 0,
@@ -169,6 +173,7 @@ impl App {
 
     pub fn finish(&mut self, result: Result<Outcome, String>) {
         self.busy = false;
+        self.cancellation = None;
         self.status = "Ready".into();
         match result {
             Ok(Outcome::LoginRequested { .. }) => {
@@ -235,6 +240,7 @@ impl App {
                 self.picker = Some(Picker::new(Kind::Session, items, &self.id));
             }
             Err(error) => {
+                self.restore_pending();
                 self.status = "Failed · see transcript".into();
                 self.append("ERROR", &error, Color::Red);
             }
@@ -315,7 +321,10 @@ impl App {
 
     pub fn enter(&mut self, commands: &mpsc::UnboundedSender<Command>) -> Result<()> {
         if self.busy {
-            return Ok(());
+            if self.input.trim_start().starts_with('/') {
+                return Ok(());
+            }
+            return self.submit(commands);
         }
         if self.input.trim_start().starts_with('/') {
             let input = std::mem::take(&mut self.input);
@@ -394,7 +403,17 @@ impl App {
     }
 
     pub fn submit(&mut self, commands: &mpsc::UnboundedSender<Command>) -> Result<()> {
-        if self.busy || self.catalog_loading || self.input.trim().is_empty() {
+        if self.catalog_loading || self.input.trim().is_empty() {
+            return Ok(());
+        }
+        if self.busy {
+            if let Some(cancellation) = &self.cancellation
+                && self.pending.is_none()
+            {
+                self.pending = Some(std::mem::take(&mut self.input));
+                cancellation.cancel();
+                self.status = "Correction queued · waiting for the active tool, if any".into();
+            }
             return Ok(());
         }
         if let Some(effort) = self.selection.reasoning_effort
@@ -407,7 +426,46 @@ impl App {
         self.append("YOU", &prompt, Color::Cyan);
         self.scroll_back = 0;
         self.status = "Working".into();
-        self.send(commands, Command::Submit(prompt))
+        let cancellation = ri_agent::cancellation::Cancellation::default();
+        self.cancellation = Some(cancellation.clone());
+        self.send(commands, Command::Submit(prompt, cancellation))
+    }
+
+    fn restore_pending(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            self.input = if self.input.is_empty() {
+                pending
+            } else {
+                format!("{pending}\n{}", self.input)
+            };
+        }
+    }
+
+    fn cancel_turn(&mut self) {
+        self.restore_pending();
+        if let Some(cancellation) = &self.cancellation {
+            cancellation.cancel();
+            self.status = "Stopping · waiting for the active tool, if any".into();
+        }
+    }
+
+    pub fn continue_pending(&mut self, commands: &mpsc::UnboundedSender<Command>) -> Result<()> {
+        if self.busy {
+            return Ok(());
+        }
+        let Some(pending) = self.pending.take() else {
+            return Ok(());
+        };
+        let draft = std::mem::replace(&mut self.input, pending);
+        self.submit(commands)?;
+        // Keep a correction in the composer if validation prevented submission.
+        if self.input.is_empty() {
+            self.input = draft;
+        } else if !draft.is_empty() {
+            self.input.push('\n');
+            self.input.push_str(&draft);
+        }
+        Ok(())
     }
 
     fn open_picker(&mut self, kind: Kind) {
@@ -506,6 +564,10 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c' | 'd'))
         {
+            if key.code == KeyCode::Char('c') && self.busy {
+                self.cancel_turn();
+                return Ok(false);
+            }
             return Ok(true);
         }
         if let Some(picker) = &mut self.picker {
@@ -551,6 +613,7 @@ impl App {
             return Ok(false);
         }
         match key.code {
+            KeyCode::Esc if self.busy => self.cancel_turn(),
             KeyCode::F(2) if !self.busy => self.open_picker(Kind::Model),
             KeyCode::F(3) if !self.busy => self.open_picker(Kind::Reasoning),
             KeyCode::F(4) if !self.busy && self.persistence => {
@@ -854,7 +917,7 @@ impl App {
 
     fn draw_composer(&self, frame: &mut Frame, area: Rect) {
         let title = if self.busy {
-            " DRAFT · agent working "
+            " Enter steers · Esc/Ctrl+C stops "
         } else {
             " PROMPT · Enter sends · @ files · $ skills "
         };
@@ -1116,7 +1179,7 @@ mod tests {
         app.input = "Please $review".into();
         app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &sender)?;
         assert!(
-            matches!(receiver.try_recv()?, Command::Submit(prompt) if prompt == "Please $review")
+            matches!(receiver.try_recv()?, Command::Submit(prompt, _) if prompt == "Please $review")
         );
         app.input = "Draft $unknown".into();
         app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &sender)?;
@@ -1246,17 +1309,86 @@ mod tests {
     }
 
     #[test]
-    fn ignores_busy_submissions_and_offers_only_supported_efforts() -> Result<()> {
+    fn cancels_without_quitting_and_submits_a_queued_correction_after_completion() -> Result<()> {
+        let mut app = app()?;
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        app.input = "initial".into();
+        app.submit(&sender)?;
+        let Command::Submit(_, first) = receiver.try_recv()? else {
+            anyhow::bail!("Expected submit");
+        };
+        app.input = "correction".into();
+        app.enter(&sender)?;
+        assert!(first.is_cancelled());
+        assert!(receiver.try_recv().is_err());
+        assert!(app.busy);
+        app.finish(Ok(Outcome::Updated {
+            id: app.id.clone(),
+            selection: app.selection.clone(),
+        }));
+        app.continue_pending(&sender)?;
+        let Command::Submit(prompt, second) = receiver.try_recv()? else {
+            anyhow::bail!("Expected correction");
+        };
+        assert_eq!(prompt, "correction");
+        assert!(!second.is_cancelled());
+        app.input = "next draft".into();
+        assert!(!app.key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &sender
+        )?);
+        assert!(second.is_cancelled());
+        assert_eq!(app.input, "next draft");
+        assert!(app.key(
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            &sender
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn keeps_queued_corrections_on_error_or_explicit_stop() -> Result<()> {
+        let mut app = app()?;
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        for fail in [false, true] {
+            app.input = "initial".into();
+            app.submit(&sender)?;
+            receiver.try_recv()?;
+            app.input = "correction".into();
+            app.enter(&sender)?;
+            if fail {
+                app.finish(Err("Saving session checkpoint failed".into()));
+            } else {
+                assert!(!app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &sender)?);
+                app.finish(Ok(Outcome::Updated {
+                    id: app.id.clone(),
+                    selection: app.selection.clone(),
+                }));
+            }
+            app.continue_pending(&sender)?;
+            assert_eq!(app.input, "correction");
+            assert!(receiver.try_recv().is_err());
+            assert!(app.pending.is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn queues_one_correction_and_offers_only_supported_efforts() -> Result<()> {
         let mut app = app()?;
         let (sender, mut receiver) = mpsc::unbounded_channel();
         app.submit(&sender)?;
         assert!(receiver.try_recv().is_err());
         app.input = "hello".into();
         app.submit(&sender)?;
-        assert!(matches!(receiver.try_recv()?, Command::Submit(prompt) if prompt == "hello"));
+        assert!(matches!(receiver.try_recv()?, Command::Submit(prompt, _) if prompt == "hello"));
         app.input = "draft".into();
         app.submit(&sender)?;
-        assert_eq!(app.input, "draft");
+        assert!(app.input.is_empty());
+        assert_eq!(app.pending.as_deref(), Some("draft"));
+        app.input = "another draft".into();
+        app.submit(&sender)?;
+        assert_eq!(app.input, "another draft");
         assert!(receiver.try_recv().is_err());
         app.models = vec![serde_json::from_str(
             r#"{"id":"mock","reasoning":{"mandatory":true,"supported_efforts":["high","none"]}}"#,
