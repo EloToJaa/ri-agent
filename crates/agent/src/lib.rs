@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod cancellation;
+mod compaction;
 pub mod credentials;
 pub mod events;
 pub mod instructions;

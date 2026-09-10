@@ -45,7 +45,7 @@ The TUI uses a responsive agent-workbench layout: a provider/session rail, persi
 - **F2**: search the active provider’s live model catalog. Switching models resets the reasoning override and removes old model-specific reasoning metadata, but preserves conversation text and tool results.
 - **F3**: select reasoning effort or **Provider default**. Choices follow the selected model’s `reasoning.supported_efforts`; mandatory reasoning models never offer `none`. Missing capability metadata only offers provider defaults, with a label explaining whether the catalog is loading/unavailable, the selected model is absent, or effort levels are not advertised. An open picker refreshes when the catalog arrives.
 - **F4**: search and resume saved sessions for this working directory. Modal selectors support wrapping Up/Down navigation, Page Up/Page Down jumps, filtering, match counts, and clear empty states.
-- **`/compact`**: compact older conversation turns into a bounded local summary while retaining the six most recent messages.
+- **`/compact`**: replace older turns with a local excerpt summary capped at 8,192 characters, prioritizing recent excerpts. Retain at least six recent messages and extend backwards to a user turn so tool calls stay with their results. If there is no useful boundary, leave history unchanged. A failed save restores the original history.
 - **`/fork`**: save the current conversation and continue it under a new session ID; the parent remains available in the session picker.
 - **`--json`**: emit newline-delimited JSON events for one-shot scripts and editor integrations.
 - **`--read-only`**: permit Read, Search, and Find while blocking Bash, Write, Edit, and Lua custom tools at the execution boundary.

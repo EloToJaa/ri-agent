@@ -144,47 +144,14 @@ impl Session {
     }
 
     pub async fn compact(&mut self) -> Result<ContextStats> {
-        const KEEP: usize = 6;
-        if self.messages.len() <= KEEP {
+        let Some(compacted) = crate::compaction::compact(&self.messages) else {
             return Ok(self.context_stats());
+        };
+        let previous = std::mem::replace(&mut self.messages, compacted);
+        if let Err(error) = self.checkpoint(false, self.messages.len()).await {
+            self.messages = previous;
+            return Err(error);
         }
-        let split = self.messages.len() - KEEP;
-        let summary = self
-            .messages
-            .get(..split)
-            .context("Invalid compaction boundary")?
-            .iter()
-            .filter_map(|message| match message {
-                Message::User { content } => Some(format!(
-                    "User: {}",
-                    content.chars().take(240).collect::<String>()
-                )),
-                Message::Assistant {
-                    content: Some(content),
-                    ..
-                } => Some(format!(
-                    "Assistant: {}",
-                    content.chars().take(240).collect::<String>()
-                )),
-                Message::Tool {
-                    tool_call_id,
-                    content,
-                } => Some(format!(
-                    "Tool {tool_call_id}: {}",
-                    content.chars().take(160).collect::<String>()
-                )),
-                Message::Assistant { content: None, .. } => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        self.messages.drain(..split);
-        self.messages.insert(
-            0,
-            Message::User {
-                content: format!("[Conversation summary; older messages compacted]\n{summary}"),
-            },
-        );
-        self.checkpoint(false, self.messages.len()).await?;
         Ok(self.context_stats())
     }
 
@@ -852,6 +819,41 @@ mod tests {
         );
         assert!(
             matches!(session.messages.last(), Some(Message::User { content }) if content == "message 9")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_compaction_save_restores_original_history() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = SessionStore::open(root.path().join("sessions.sqlite3"), root.path())?;
+        let mut session = Session::new(
+            Arc::new(MockProvider("openrouter")),
+            AgentConfig {
+                model: "mock".into(),
+                reasoning_effort: None,
+                max_turns: NonZeroUsize::MIN,
+                limits: Limits::default(),
+                lua: LuaConfig::from_source("return {}", "test")?,
+            },
+            Output::default(),
+        )
+        .with_store(store.clone());
+        for index in 0..10 {
+            session.messages.push(Message::User {
+                content: format!("message {index}"),
+            });
+        }
+        session.checkpoint(false, session.messages.len()).await?;
+        let original = serde_json::to_value(&session.messages)?;
+        let revision = session.revision;
+        store.save(store.load(session.id.clone()).await?).await?;
+        assert!(session.compact().await.is_err());
+        assert_eq!(serde_json::to_value(&session.messages)?, original);
+        assert_eq!(session.revision, revision);
+        assert_eq!(
+            serde_json::to_value(store.load(session.id.clone()).await?.messages)?,
+            original
         );
         Ok(())
     }
