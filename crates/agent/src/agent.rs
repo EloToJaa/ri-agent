@@ -70,6 +70,7 @@ pub struct Session {
     store: Option<SessionStore>,
     revision: i64,
     skills: crate::skills::Skills,
+    instruction_directory: Option<std::path::PathBuf>,
 }
 
 impl Session {
@@ -83,6 +84,7 @@ impl Session {
             store: None,
             revision: 0,
             skills: crate::skills::Skills::default(),
+            instruction_directory: None,
         }
     }
 
@@ -94,6 +96,13 @@ impl Session {
 
     pub const fn skills(&self) -> &crate::skills::Skills {
         &self.skills
+    }
+
+    /// Reload scoped AGENTS.md files from this directory before each submitted prompt.
+    #[must_use]
+    pub fn with_project_instructions(mut self, directory: std::path::PathBuf) -> Self {
+        self.instruction_directory = Some(directory);
+        self
     }
 
     pub fn provider(&self) -> Arc<dyn Provider> {
@@ -355,6 +364,17 @@ impl Session {
         }
         let prompt = self.skills.expand(prompt).await?;
         let prompt = self.config.lua.hook("before_prompt", prompt).await?;
+        let prompt = if let Some(directory) = &self.instruction_directory {
+            let instructions =
+                crate::instructions::ProjectInstructions::load(directory.clone()).await?;
+            self.output.emit(Event::Progress(format!(
+                "Loaded {} project instruction files",
+                instructions.paths.len()
+            )));
+            instructions.append_to(prompt)
+        } else {
+            prompt
+        };
         if cancellation.is_cancelled() {
             return Ok(SubmitOutcome::Cancelled);
         }

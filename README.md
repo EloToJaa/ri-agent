@@ -79,6 +79,16 @@ cargo run -p ri-agent-cli -- --session-db /path/to/sessions.sqlite3
 
 Resume restores the saved model and reasoning choice rather than configuration defaults. New Lua configuration and limits apply when the process starts. Ctrl+L creates a new session without deleting the old one. Tools are never replayed during resume. Interrupted runs restore the last completed user prompt and show a warning: local side effects from the discarded incomplete turn may remain. Optimistic revisions prevent simultaneous processes from silently overwriting the same session. Persistence errors stop the turn rather than silently losing history.
 
+## Project instructions
+
+Before each submitted prompt, the CLI and TUI reload `AGENTS.md` files from the nearest ancestor containing `.git` (a directory or worktree file) down to the launch directory, plus nested instruction files below the launch directory. Without a Git root, discovery starts at the launch directory. Sibling directories outside that subtree are not scanned.
+
+Each document is labeled with its path and scope. Rules apply to its containing directory and descendants; deeper rules override ancestor rules only within their subtree. Explicit user requests take precedence. These are instructions for the model, not a filesystem permission boundary. Documents are appended after skill expansion and the Lua `before_prompt` hook, so mentions such as `$name` inside `AGENTS.md` do not invoke skills. Loading instructions executes no code and does not alter the files.
+
+Discovery skips directory symlinks and `.git`, `.hg`, `.svn`, `target`, `node_modules`, `.direnv`, `.cache`, `.venv`, and `__pycache__` directories. It does not apply Git ignore rules. Instruction-file symlinks are supported and retain the scope of their containing directory. A maximum of 4,096 directories, 128 KiB per file, and 512 KiB of combined instruction context is allowed. Unreadable, invalid UTF-8, nonregular, or oversized instruction files fail the prompt before the model request instead of silently dropping rules.
+
+Snapshots are saved with their prompts. Resume preserves those snapshots; subsequent prompts load fresh instructions, with the new snapshot explicitly superseding older project rules. Use `--no-project-instructions` to disable loading for an invocation. Library callers opt in with `Session::with_project_instructions(directory)`, using an absolute launch directory. For work outside the discovery scope, read the applicable instruction files explicitly.
+
 ## Skills
 
 Skills are Markdown instructions invoked explicitly with `$name`, not executable plugins. The CLI and TUI discover skills at startup from:

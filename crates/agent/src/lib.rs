@@ -2,6 +2,7 @@ pub mod agent;
 pub mod cancellation;
 pub mod credentials;
 pub mod events;
+pub mod instructions;
 pub mod limits;
 pub mod providers;
 // Preserve the original public paths for downstream library users.

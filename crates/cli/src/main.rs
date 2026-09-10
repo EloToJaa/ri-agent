@@ -70,6 +70,9 @@ struct Args {
     /// Block Bash, Write, Edit, and custom tools for this invocation.
     #[arg(long)]
     read_only: bool,
+    /// Disable automatic AGENTS.md discovery for this invocation.
+    #[arg(long)]
+    no_project_instructions: bool,
 }
 
 #[derive(clap::Subcommand)]
@@ -175,6 +178,9 @@ async fn main() -> Result<()> {
         Output::default()
     };
     let mut session = Session::new(provider, config, output).with_skills(skills);
+    if !args.no_project_instructions {
+        session = session.with_project_instructions(env::current_dir()?);
+    }
     if let Some(store) = store {
         session = session.with_store(store);
     }

@@ -118,6 +118,12 @@ fn wait(mut command: Command) -> Result<Output> {
 }
 
 fn cli(address: SocketAddr) -> Command {
+    let mut command = cli_with_project_instructions(address);
+    command.arg("--no-project-instructions");
+    command
+}
+
+fn cli_with_project_instructions(address: SocketAddr) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ri"));
     command
         .env("MODEL", "mock-model")
@@ -126,6 +132,79 @@ fn cli(address: SocketAddr) -> Command {
         .env("OPENROUTER_BASE_URL", format!("http://{address}"))
         .env("NO_PROXY", "127.0.0.1");
     command
+}
+
+#[test]
+fn loads_scoped_project_instructions_and_refreshes_them_on_resume() -> Result<()> {
+    let root = std::env::temp_dir().join(format!("ri-instructions-{}", rand::random::<u64>()));
+    std::fs::create_dir_all(root.join("src/nested"))?;
+    std::fs::write(root.join(".git"), "gitdir: unused")?;
+    std::fs::write(
+        root.join("AGENTS.md"),
+        "Old root rules. $missing is plain text here.",
+    )?;
+    std::fs::write(root.join("src/AGENTS.md"), "Source rules")?;
+    std::fs::write(root.join("src/nested/AGENTS.md"), "Nested rules")?;
+    std::fs::create_dir(root.join("sibling"))?;
+    std::fs::write(root.join("sibling/AGENTS.md"), "Unrelated sibling rules")?;
+    let response = json!({"choices":[{"message":{"content":"Done"}}]});
+    let (address, handle) = server(vec![
+        ("POST", response.clone()),
+        ("POST", response.clone()),
+        ("POST", response),
+    ])?;
+    let db = root.join("sessions.sqlite3");
+    let mut command = cli_with_project_instructions(address);
+    command
+        .current_dir(root.join("src"))
+        .arg("--session-db")
+        .arg(&db)
+        .args(["-p", "first request"]);
+    let output = wait(command)?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::write(root.join("AGENTS.md"), "New root rules")?;
+    let mut command = cli_with_project_instructions(address);
+    command
+        .current_dir(root.join("src"))
+        .arg("--session-db")
+        .arg(&db)
+        .args(["--resume", "-p", "second request"]);
+    let output = wait(command)?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut command = cli(address);
+    command
+        .current_dir(root.join("src"))
+        .args(["--no-save", "-p", "opted out"]);
+    assert!(wait(command)?.status.success());
+    let requests = requests(handle)?;
+    let first = field(&requests, "/0/messages/0/content")?
+        .as_str()
+        .context("Missing first prompt")?;
+    assert!(first.starts_with("first request"));
+    assert!(first.contains("Old root rules"));
+    assert!(first.contains("Source rules"));
+    assert!(first.contains("Nested rules"));
+    assert!(!first.contains("Unrelated sibling rules"));
+    assert_eq!(
+        field(&requests, "/1/messages/0/content")?.as_str(),
+        Some(first)
+    );
+    let second = field(&requests, "/1/messages/2/content")?
+        .as_str()
+        .context("Missing resumed prompt")?;
+    assert!(second.contains("New root rules"));
+    assert!(!second.contains("Old root rules"));
+    assert_eq!(field(&requests, "/2/messages/0/content")?, "opted out");
+    std::fs::remove_dir_all(root)?;
+    Ok(())
 }
 
 #[test]
