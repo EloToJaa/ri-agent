@@ -124,6 +124,11 @@ async fn execute_with(
     output: &crate::events::Output,
     lua: Option<&std::sync::Arc<crate::config::LuaConfig>>,
 ) -> Result<String> {
+    if limits.read_only && !matches!(call.function.name.as_str(), "Read" | "Search" | "Find") {
+        let error = format!("Tool {} blocked by read-only policy", call.function.name);
+        output.emit(crate::events::Event::Progress(error.clone()));
+        return Err(anyhow::anyhow!(error));
+    }
     output.emit(crate::events::Event::Progress(format!(
         "Running {} ({})...",
         call.function.name, call.id
@@ -258,6 +263,27 @@ mod tests {
             execute(&call, Limits::default()).await?,
             include_str!("read.rs")
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn read_only_policy_blocks_mutations_before_execution() -> Result<()> {
+        let limits = Limits {
+            read_only: true,
+            ..Limits::default()
+        };
+        let call: ToolCall = serde_json::from_value(json!({
+            "id":"edit_1","type":"function","function":{"name":"Edit","arguments":"{}"}
+        }))?;
+        let error = execute(&call, limits)
+            .await
+            .err()
+            .context("Edit must be blocked")?;
+        assert!(error.to_string().contains("read-only policy"));
+        let read: ToolCall = serde_json::from_value(json!({
+            "id":"read_1","type":"function","function":{"name":"Read","arguments":"{}"}
+        }))?;
+        assert!(execute(&read, limits).await.is_err());
         Ok(())
     }
 }

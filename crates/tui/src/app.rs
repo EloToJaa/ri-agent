@@ -641,6 +641,7 @@ impl App {
                             command_timeout: std::time::Duration::from_secs(10),
                             max_output_bytes: std::num::NonZeroUsize::MIN
                                 .saturating_add(1024 * 1024 - 1),
+                            read_only: false,
                         },
                     )
                     .await

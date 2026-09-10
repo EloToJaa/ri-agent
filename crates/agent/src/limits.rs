@@ -8,6 +8,7 @@ pub const MAX_TURNS: NonZeroUsize = NonZeroUsize::MIN.saturating_add(19);
 pub struct Limits {
     pub command_timeout: std::time::Duration,
     pub max_output_bytes: NonZeroUsize,
+    pub read_only: bool,
 }
 
 impl Default for Limits {
@@ -15,6 +16,7 @@ impl Default for Limits {
         Self {
             command_timeout: std::time::Duration::from_mins(1),
             max_output_bytes: NonZeroUsize::MIN.saturating_add(32 * 1024 - 1),
+            read_only: false,
         }
     }
 }
@@ -56,5 +58,10 @@ mod tests {
         );
         assert_eq!(read_output(b"abc".as_slice(), cap).await?, "abc");
         Ok(())
+    }
+
+    #[test]
+    fn defaults_to_writable_execution() {
+        assert!(!Limits::default().read_only);
     }
 }

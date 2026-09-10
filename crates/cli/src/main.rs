@@ -67,6 +67,9 @@ struct Args {
     /// Emit newline-delimited JSON events instead of human-readable output.
     #[arg(long)]
     json: bool,
+    /// Block Bash, Write, Edit, and custom tools for this invocation.
+    #[arg(long)]
+    read_only: bool,
 }
 
 #[derive(clap::Subcommand)]
@@ -155,6 +158,7 @@ async fn main() -> Result<()> {
                 .max_output_bytes
                 .or(settings.max_output_bytes)
                 .unwrap_or_else(|| limits::Limits::default().max_output_bytes),
+            read_only: args.read_only,
         },
         lua,
     };
