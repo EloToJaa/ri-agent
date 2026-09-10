@@ -26,6 +26,26 @@ pub struct ContextStats {
     pub approximate_tokens: usize,
 }
 
+const MAX_PROVIDER_ATTEMPTS: usize = 3;
+
+fn retryable_provider_error(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    [
+        "timed out",
+        "timeout",
+        "connection",
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+        "rate limit",
+        "temporarily unavailable",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Selection {
     pub model: String,
@@ -358,20 +378,15 @@ impl Session {
                 reasoning_effort: self.config.reasoning_effort,
             };
             // Hooks transform complete text. Do not display untransformed deltas.
-            let response = tokio::select! {
-                biased;
-                () = cancellation.cancelled() => return Ok(SubmitOutcome::Cancelled),
-                response = async {
-                    if self.config.lua.has_after_response_hook {
-                        self.provider.complete(request).await
-                    } else {
-                        self.provider.complete_stream(request, &self.output).await
-                    }
-                } => response,
-            }
-            .with_context(|| {
-                format!("Failed to request {} model response", self.provider.name())
-            })?;
+            let response = match self.request_with_retry(request, cancellation).await {
+                Ok(response) => response,
+                Err(_error) if cancellation.is_cancelled() => return Ok(SubmitOutcome::Cancelled),
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("Failed to request {} model response", self.provider.name())
+                    });
+                }
+            };
             let outcome = ResponseProcessor::new(response)
                 .with_cancellation(cancellation.clone())
                 .with_limits(self.config.limits)
@@ -390,6 +405,48 @@ impl Session {
             }
         }
         bail!("Maximum model turns ({}) reached", self.config.max_turns)
+    }
+
+    async fn request_with_retry(
+        &self,
+        request: CompletionRequest<'_>,
+        cancellation: &crate::cancellation::Cancellation,
+    ) -> Result<crate::providers::Completion> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let result = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(anyhow::anyhow!("Request cancelled")),
+                response = async {
+                    if self.config.lua.has_after_response_hook {
+                        self.provider.complete(request).await
+                    } else {
+                        self.provider.complete_stream(request, &self.output).await
+                    }
+                } => response,
+            };
+            match result {
+                Ok(response) => return Ok(response),
+                Err(error)
+                    if attempt < MAX_PROVIDER_ATTEMPTS && retryable_provider_error(&error) =>
+                {
+                    let delay = std::time::Duration::from_millis(100 * (1_u64 << (attempt - 1)));
+                    self.output.emit(Event::Progress(format!(
+                        "Transient provider failure; retrying in {} ms ({}/{})...",
+                        delay.as_millis(),
+                        attempt,
+                        MAX_PROVIDER_ATTEMPTS - 1
+                    )));
+                    tokio::select! {
+                        biased;
+                        () = cancellation.cancelled() => return Err(anyhow::anyhow!("Request cancelled")),
+                        () = tokio::time::sleep(delay) => {}
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 }
 
@@ -412,6 +469,77 @@ mod tests {
         fn complete<'a>(&'a self, _: CompletionRequest<'a>) -> ProviderFuture<'a, Completion> {
             Box::pin(async { bail!("Unexpected completion") })
         }
+    }
+
+    struct RetryProvider {
+        attempts: std::sync::Mutex<usize>,
+    }
+    impl Provider for RetryProvider {
+        fn id(&self) -> &'static str {
+            "mock"
+        }
+        fn name(&self) -> &'static str {
+            "Mock"
+        }
+        fn models(&self) -> ProviderFuture<'_, Vec<Model>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+        fn complete<'a>(&'a self, _: CompletionRequest<'a>) -> ProviderFuture<'a, Completion> {
+            Box::pin(async move {
+                let mut attempts = self
+                    .attempts
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("poisoned"))?;
+                *attempts += 1;
+                let attempt = *attempts;
+                drop(attempts);
+                if attempt < 3 {
+                    bail!("HTTP 503 service unavailable")
+                }
+                Ok(serde_json::from_value(
+                    serde_json::json!({"content":"Recovered"}),
+                )?)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_transient_provider_failures_and_emits_progress() -> Result<()> {
+        let provider = Arc::new(RetryProvider {
+            attempts: std::sync::Mutex::new(0),
+        });
+        let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let mut session = cancellation_session(provider.clone(), Output::channel(sender))?;
+        session.submit("retry".into()).await?;
+        assert_eq!(
+            *provider
+                .attempts
+                .lock()
+                .map_err(|_| anyhow::anyhow!("poisoned"))?,
+            3
+        );
+        let progress: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                Event::Progress(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            progress
+                .iter()
+                .filter(|text| text.contains("retrying"))
+                .count(),
+            2
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_permanent_provider_errors() -> Result<()> {
+        let provider = Arc::new(MockProvider("mock"));
+        let mut session = cancellation_session(provider, Output::default())?;
+        assert!(session.submit("permanent".into()).await.is_err());
+        Ok(())
     }
 
     struct CancellationProvider {

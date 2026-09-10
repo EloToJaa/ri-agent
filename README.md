@@ -59,6 +59,8 @@ Quitting drops the active agent turn; the SQLite checkpoint remains resumable an
 
 The visible transcript retains up to 4,000 lines; model conversation history remains intact until cleared. Failed turns are removed from model history, without undoing local tool effects. The TUI requires a terminal; use `-p` for scripts and pipes.
 
+Provider requests retry up to two times after transient connection, timeout, rate-limit, or 5xx failures, with 100 ms and 200 ms backoff. Retry progress is emitted as an activity event. Authentication, malformed-response, model-access, and other non-transient errors fail immediately. A cancelled request interrupts both the request and its backoff; no tool call is executed until a complete provider response is received.
+
 Orderly cancellation preserves the submitted prompt, completed responses and tool results, explicit `executed=false` results for skipped calls, and a harness cancellation notice. Partial streamed text stays visibly incomplete and is excluded from model history. The saved conversation can be resumed without replaying tools. This differs from abruptly quitting or crashing, which restores the last completed prompt as described below.
 
 ## SQLite sessions
