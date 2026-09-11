@@ -10,6 +10,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
 use std::{num::NonZeroUsize, sync::Arc};
 
 const CANCELLED_NOTICE: &str = "[Harness notice: the user cancelled this turn. Completed tool effects remain; tools marked executed=false were skipped. Follow the user's next instructions.]";
@@ -77,6 +78,9 @@ pub struct Session {
     skills: crate::skills::Skills,
     instruction_directory: Option<std::path::PathBuf>,
     status: SessionStatus,
+    artifacts: Option<crate::artifacts::Artifacts>,
+    context_window: Option<NonZeroUsize>,
+    response_reserve: NonZeroUsize,
 }
 
 impl Session {
@@ -93,6 +97,9 @@ impl Session {
             skills: crate::skills::Skills::default(),
             instruction_directory: None,
             status: SessionStatus::Ready,
+            artifacts: None,
+            context_window: None,
+            response_reserve: NonZeroUsize::MIN.saturating_add(8191),
         }
     }
 
@@ -101,6 +108,50 @@ impl Session {
     pub const fn with_auto_compact_tokens(mut self, threshold: Option<NonZeroUsize>) -> Self {
         self.auto_compact_tokens = threshold;
         self
+    }
+
+    #[must_use]
+    pub const fn with_context_budget(
+        mut self,
+        window: Option<NonZeroUsize>,
+        response_reserve: NonZeroUsize,
+    ) -> Self {
+        self.context_window = window;
+        self.response_reserve = response_reserve;
+        self
+    }
+
+    async fn archive(&mut self, content: String) -> Result<std::path::PathBuf> {
+        if self.artifacts.is_none() {
+            self.artifacts = Some(crate::artifacts::Artifacts::new(
+                self.store.as_ref().map(SessionStore::artifact_directory),
+            )?);
+        }
+        self.artifacts
+            .as_ref()
+            .context("Missing context archive")?
+            .save(content)
+            .await
+    }
+
+    async fn archived_compaction(&mut self) -> Result<Option<Vec<Message>>> {
+        let Some(mut compacted) = crate::compaction::compact(&self.messages) else {
+            return Ok(None);
+        };
+        if serde_json::to_vec(&compacted)?.len() >= serde_json::to_vec(&self.messages)?.len() {
+            return Ok(None);
+        }
+        let path = self
+            .archive(serde_json::to_string_pretty(&self.messages)?)
+            .await?;
+        if let Some(Message::User { content }) = compacted.first_mut() {
+            let _ = writeln!(
+                content,
+                "\nFull conversation archive: {}. Use Read or Search to recover omitted instructions, decisions, and tool results.",
+                path.display()
+            );
+        }
+        Ok(Some(compacted))
     }
 
     #[must_use]
@@ -162,7 +213,7 @@ impl Session {
     }
 
     pub async fn compact(&mut self) -> Result<ContextStats> {
-        let Some(compacted) = crate::compaction::compact(&self.messages) else {
+        let Some(compacted) = self.archived_compaction().await? else {
             return Ok(self.context_stats());
         };
         let previous = std::mem::replace(&mut self.messages, compacted);
@@ -181,7 +232,7 @@ impl Session {
         {
             return Ok(());
         }
-        let Some(compacted) = crate::compaction::compact(&self.messages) else {
+        let Some(compacted) = self.archived_compaction().await? else {
             return Ok(());
         };
         let removed = self.messages.len() - compacted.len();
@@ -197,7 +248,7 @@ impl Session {
             return Ok(());
         }
         let new_stable_len = *stable_len - removed;
-        if let Err(error) = self.checkpoint(true, new_stable_len).await {
+        if let Err(error) = self.checkpoint(true, self.messages.len()).await {
             self.messages = previous;
             return Err(error);
         }
@@ -205,6 +256,69 @@ impl Session {
         self.output.emit(Event::Progress(format!(
             "Automatically compacted context: approximately {before} → {after} tokens"
         )));
+        Ok(())
+    }
+
+    async fn prepare_context(
+        &mut self,
+        tools: &[serde_json::Value],
+        stable_len: &mut usize,
+    ) -> Result<()> {
+        let tool_tokens = serde_json::to_vec(tools)?.len().div_ceil(4);
+        let window = self
+            .context_window
+            .map(NonZeroUsize::get)
+            .or_else(|| self.provider.context_window(&self.config.model));
+        // Extra allowance for protocol wrappers and token-estimation error.
+        let overhead = tool_tokens
+            .saturating_add(self.response_reserve.get())
+            .saturating_add(1024);
+        let hard_budget = window.map(|window| window.saturating_sub(overhead));
+        let threshold = match (self.auto_compact_tokens.map(NonZeroUsize::get), hard_budget) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let Some(threshold) = threshold else {
+            return Ok(());
+        };
+        let configured = self.auto_compact_tokens;
+        self.auto_compact_tokens = NonZeroUsize::new(threshold.max(1));
+        let result = self.auto_compact(stable_len).await;
+        self.auto_compact_tokens = configured;
+        result?;
+        if self.context_stats().approximate_tokens >= threshold {
+            let previous = self.messages.clone();
+            for index in 0..self.messages.len() {
+                let Some(Message::Tool { content, .. }) = self.messages.get(index) else {
+                    continue;
+                };
+                if content.len() <= 4096 || content.contains("[Archived tool result:") {
+                    continue;
+                }
+                let original = content.clone();
+                let path = self.archive(original.clone()).await?;
+                if let Some(Message::Tool { content, .. }) = self.messages.get_mut(index) {
+                    *content = format!(
+                        "[Archived tool result: {}]\n{}",
+                        path.display(),
+                        crate::compaction::excerpt(&original, 1200)
+                    );
+                }
+            }
+            if let Err(error) = self.checkpoint(true, self.messages.len()).await {
+                self.messages = previous;
+                return Err(error);
+            }
+        }
+        if let Some(budget) = hard_budget {
+            let estimate = self.context_stats().approximate_tokens;
+            if estimate > budget {
+                bail!(
+                    "Context budget exceeded: approximately {estimate} history tokens plus {overhead} reserved/tool tokens exceeds model window {}. Reduce the prompt, compact, or select a larger context window.",
+                    window.unwrap_or_default()
+                );
+            }
+        }
         Ok(())
     }
 
@@ -440,7 +554,7 @@ impl Session {
             if cancellation.is_cancelled() {
                 return Ok(SubmitOutcome::Cancelled);
             }
-            self.auto_compact(stable_len).await?;
+            self.prepare_context(&definitions, stable_len).await?;
             self.output.emit(Event::Progress(format!(
                 "Requesting model response ({}/{})...",
                 turn + 1,
@@ -680,6 +794,77 @@ mod tests {
             },
             output,
         ))
+    }
+
+    #[tokio::test]
+    async fn active_turn_archives_large_results_without_losing_tool_pairing() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let store =
+            SessionStore::open(directory.path().join("sessions.sqlite3"), directory.path())?;
+        let mut session = cancellation_session(Arc::new(MockProvider("mock")), Output::default())?
+            .with_store(store.clone())
+            .with_auto_compact_tokens(NonZeroUsize::new(100));
+        let original = format!(
+            "build start\n{}\nerror: decisive failure at end",
+            "log\n".repeat(4000)
+        );
+        session.messages = vec![
+            Message::User {
+                content: "fix build; preserve API".into(),
+            },
+            serde_json::from_value(
+                serde_json::json!({"role":"assistant","tool_calls":[{"id":"build","type":"function","function":{"name":"Bash","arguments":"{}"}}]}),
+            )?,
+            Message::Tool {
+                tool_call_id: "build".into(),
+                content: original.clone(),
+            },
+        ];
+        session.prepare_context(&[], &mut 0).await?;
+        assert_eq!(session.messages.len(), 3);
+        let Some(Message::Tool {
+            content,
+            tool_call_id,
+        }) = session.messages.last()
+        else {
+            bail!("missing result");
+        };
+        assert_eq!(tool_call_id, "build");
+        assert!(content.contains("decisive failure"));
+        let path = content
+            .lines()
+            .next()
+            .context("archive header")?
+            .strip_prefix("[Archived tool result: ")
+            .and_then(|value| value.strip_suffix(']'))
+            .context("archive path")?;
+        assert_eq!(std::fs::read_to_string(path)?, original);
+        let id = session.id.clone();
+        session.resume(&id).await?;
+        assert!(session.messages.iter().any(|message| matches!(message, Message::Tool { tool_call_id, .. } if tool_call_id == "build")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn context_budget_counts_tools_and_response_reserve_before_requesting() -> Result<()> {
+        let mut session = cancellation_session(Arc::new(MockProvider("mock")), Output::default())?
+            .with_context_budget(
+                NonZeroUsize::new(2000),
+                NonZeroUsize::MIN.saturating_add(999),
+            );
+        session.messages.push(Message::User {
+            content: "small task".into(),
+        });
+        let error = session
+            .prepare_context(
+                &[serde_json::json!({"description":"tool".repeat(2000)})],
+                &mut 0,
+            )
+            .await
+            .err()
+            .context("expected budget error")?;
+        assert!(error.to_string().contains("Context budget exceeded"));
+        Ok(())
     }
 
     #[tokio::test]
@@ -995,7 +1180,7 @@ mod tests {
         );
         for index in 0..10 {
             session.messages.push(Message::User {
-                content: format!("message {index}"),
+                content: format!("message {index} {}", "detail ".repeat(500)),
             });
         }
         let before = session.context_stats();
@@ -1006,7 +1191,7 @@ mod tests {
             matches!(session.messages.first(), Some(Message::User { content }) if content.contains("message 0"))
         );
         assert!(
-            matches!(session.messages.last(), Some(Message::User { content }) if content == "message 9")
+            matches!(session.messages.last(), Some(Message::User { content }) if content.starts_with("message 9"))
         );
         Ok(())
     }
@@ -1044,12 +1229,12 @@ mod tests {
             if enabled {
                 let saved = store.load(session.id.clone()).await?;
                 assert!(saved.interrupted);
-                assert_eq!(saved.stable_len, stable);
+                assert_eq!(saved.stable_len, session.messages.len());
                 let mut restored =
                     cancellation_session(Arc::new(MockProvider("openrouter")), Output::default())?
                         .with_store(store.clone());
                 assert!(restored.resume(&session.id).await?);
-                assert_eq!(restored.messages.len(), stable + 1);
+                assert_eq!(restored.messages.len(), session.messages.len() + 1);
             }
         }
         Ok(())
@@ -1132,7 +1317,7 @@ mod tests {
         .with_store(store.clone());
         for index in 0..10 {
             session.messages.push(Message::User {
-                content: format!("message {index}"),
+                content: format!("message {index} {}", "detail ".repeat(500)),
             });
         }
         session.checkpoint(false, session.messages.len()).await?;

@@ -22,6 +22,7 @@ pub struct Codex {
     client: Client,
     base_url: String,
     credentials: CodexCredentials,
+    contexts: std::sync::RwLock<std::collections::HashMap<String, usize>>,
 }
 
 impl Codex {
@@ -37,6 +38,7 @@ impl Codex {
                 .build()?,
             base_url: base_url.trim_end_matches('/').to_owned(),
             credentials,
+            contexts: std::sync::RwLock::default(),
         })
     }
 
@@ -65,6 +67,8 @@ struct CatalogModel {
     supported_reasoning_levels: Vec<ReasoningLevel>,
     #[serde(default)]
     priority: usize,
+    #[serde(default)]
+    context_window: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -88,6 +92,7 @@ fn catalog_models(mut catalog: Catalog) -> Result<Vec<Model>> {
             Model {
                 id: entry.slug,
                 name: entry.display_name,
+                context_length: entry.context_window,
                 supported_parameters: vec!["tools".into(), "reasoning".into()],
                 reasoning: Some(ReasoningCapabilities {
                     mandatory: !levels.iter().any(|level| level == "none"),
@@ -110,6 +115,9 @@ fn catalog_request(client: &Client, base_url: &str) -> reqwest::RequestBuilder {
 }
 
 impl Provider for Codex {
+    fn context_window(&self, model: &str) -> Option<usize> {
+        self.contexts.read().ok()?.get(model).copied()
+    }
     fn id(&self) -> &'static str {
         "openai-codex"
     }
@@ -129,7 +137,15 @@ impl Provider for Codex {
                 .json::<Catalog>()
                 .await
                 .context("Invalid OpenAI Codex model catalog")?;
-            catalog_models(catalog)
+            let models = catalog_models(catalog)?;
+            *self
+                .contexts
+                .write()
+                .map_err(|_| anyhow::anyhow!("Model context cache poisoned"))? = models
+                .iter()
+                .filter_map(|model| Some((model.id.clone(), model.context_length?)))
+                .collect();
+            Ok(models)
         })
     }
 

@@ -1,4 +1,5 @@
 pub mod agent;
+mod artifacts;
 pub mod cancellation;
 mod compaction;
 pub mod credentials;

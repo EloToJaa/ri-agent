@@ -1,8 +1,26 @@
 use crate::message::Message;
+use std::fmt::Write as _;
 
 const KEEP: usize = 6;
 const SUMMARY_CHARS: usize = 8192;
 const HEADER: &str = "[Conversation summary; older messages compacted]\n";
+
+/// Preserve both the beginning and conclusion, including errors at the end of logs.
+pub fn excerpt(content: &str, limit: usize) -> String {
+    if content.chars().count() <= limit {
+        return content.to_owned();
+    }
+    let head: String = content.chars().take(limit / 2).collect();
+    let tail: String = content
+        .chars()
+        .rev()
+        .take(limit / 2)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{head}\n[... excerpt; full content in archive ...]\n{tail}")
+}
 
 /// Retain at least six messages, moving the boundary back to a user turn so
 /// assistant tool calls and their results always remain together.
@@ -19,18 +37,34 @@ pub fn compact(messages: &[Message]) -> Option<Vec<Message>> {
     let mut excerpts = Vec::new();
     for message in messages.get(..split)?.iter().rev() {
         let (label, content) = match message {
-            Message::User { content } => ("User", content.as_str()),
+            Message::User { content } => ("Request / constraints", content.clone()),
             Message::Assistant {
-                content: Some(content),
+                content,
+                tool_calls,
                 ..
-            } => ("Assistant", content.as_str()),
-            Message::Tool { content, .. } => ("Tool result", content.as_str()),
-            Message::Assistant { content: None, .. } => continue,
+            } => (
+                "Decisions / progress / remaining work (assistant)",
+                format!(
+                    "{}{}",
+                    content.as_deref().unwrap_or_default(),
+                    tool_calls.iter().fold(String::new(), |mut text, call| {
+                        let _ = write!(
+                            text,
+                            "\nTool {} ({}): {}",
+                            call.function.name,
+                            call.id,
+                            excerpt(call.function.arguments.as_deref().unwrap_or_default(), 200)
+                        );
+                        text
+                    })
+                ),
+            ),
+            Message::Tool {
+                content,
+                tool_call_id,
+            } => ("Observed tool result", format!("{tool_call_id}: {content}")),
         };
-        let excerpt = format!(
-            "{label}: {}\n",
-            content.chars().take(240).collect::<String>()
-        );
+        let excerpt = format!("{label}: {}\n", excerpt(&content, 800));
         let length = excerpt.chars().count();
         if length > remaining {
             break;

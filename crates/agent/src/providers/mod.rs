@@ -73,6 +73,10 @@ pub trait Provider: Send + Sync {
     fn id(&self) -> &'static str;
     fn name(&self) -> &'static str;
     fn models(&self) -> ProviderFuture<'_, Vec<Model>>;
+    /// Advertised context size, when a catalog has been loaded.
+    fn context_window(&self, _model: &str) -> Option<usize> {
+        None
+    }
     fn complete<'a>(&'a self, request: CompletionRequest<'a>) -> ProviderFuture<'a, Completion>;
     /// Emit provisional text deltas; return the authoritative complete message.
     /// Tools must only execute after this future succeeds.
@@ -90,6 +94,8 @@ pub struct Model {
     pub id: String,
     #[serde(default)]
     pub name: String,
+    #[serde(default)]
+    pub context_length: Option<usize>,
     #[serde(default)]
     pub supported_parameters: Vec<String>,
     #[serde(default)]

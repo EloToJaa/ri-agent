@@ -41,6 +41,7 @@ pub struct OpenRouter {
     client: Client,
     base_url: String,
     key: ApiKey,
+    contexts: std::sync::RwLock<std::collections::HashMap<String, usize>>,
 }
 
 impl OpenRouter {
@@ -65,6 +66,7 @@ impl OpenRouter {
                 .build()?,
             base_url: base_url.trim_end_matches('/').to_owned(),
             key,
+            contexts: std::sync::RwLock::default(),
         })
     }
 
@@ -115,6 +117,9 @@ impl OpenRouter {
 }
 
 impl Provider for OpenRouter {
+    fn context_window(&self, model: &str) -> Option<usize> {
+        self.contexts.read().ok()?.get(model).copied()
+    }
     fn id(&self) -> &'static str {
         "openrouter"
     }
@@ -144,6 +149,13 @@ impl Provider for OpenRouter {
             if models.is_empty() {
                 bail!("OpenRouter catalog contains no tool-capable models");
             }
+            *self
+                .contexts
+                .write()
+                .map_err(|_| anyhow::anyhow!("Model context cache poisoned"))? = models
+                .iter()
+                .filter_map(|model| Some((model.id.clone(), model.context_length?)))
+                .collect();
             Ok(models)
         })
     }

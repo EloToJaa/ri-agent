@@ -86,6 +86,9 @@ pub struct SessionSummary {
 }
 
 impl SessionStore {
+    pub(crate) fn artifact_directory(&self) -> PathBuf {
+        self.path.with_extension("artifacts")
+    }
     pub fn default_path() -> Result<PathBuf> {
         Ok(crate::config::harness_directory()?.join("sessions.sqlite3"))
     }
