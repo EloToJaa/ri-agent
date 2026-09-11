@@ -62,11 +62,11 @@ The TUI uses a responsive agent-workbench layout: a provider/session rail, persi
 - **Ctrl+L**: start a new conversation when idle.
 Quitting drops the active agent turn; the SQLite checkpoint remains resumable and local tool effects already applied remain.
 
-The visible transcript retains up to 4,000 lines; model conversation history remains intact until cleared. Failed turns are removed from model history, without undoing local tool effects. The TUI requires a terminal; use `-p` for scripts and pipes.
+The visible transcript retains up to 4,000 lines; model conversation history remains intact until cleared. Failed turns retain completed tool work and a failure notice. Turn limits pause the session; other errors mark it failed. A failure before any tool work removes the failed prompt. The TUI requires a terminal; use `-p` for scripts and pipes.
 
 Provider requests retry up to two times after transient connection, timeout, rate-limit, or 5xx failures, with 100 ms and 200 ms backoff. Retry progress is emitted as an activity event. Authentication, malformed-response, model-access, and other non-transient errors fail immediately. A cancelled request interrupts both the request and its backoff; no tool call is executed until a complete provider response is received.
 
-Orderly cancellation preserves the submitted prompt, completed responses and tool results, explicit `executed=false` results for skipped calls, and a harness cancellation notice. Partial streamed text stays visibly incomplete and is excluded from model history. The saved conversation can be resumed without replaying tools. This differs from abruptly quitting or crashing, which restores the last completed prompt as described below.
+Orderly cancellation preserves the submitted prompt, completed responses and tool results, explicit `executed=false` results for skipped calls, and a harness cancellation notice. Partial streamed text stays visibly incomplete and is excluded from model history. The saved conversation can be resumed without replaying tools. Abrupt exits recover the durable tool journal described below.
 
 ## SQLite sessions
 
@@ -81,7 +81,7 @@ cargo run -p ri-agent-cli -- --no-save            # In-memory only
 cargo run -p ri-agent-cli -- --session-db /path/to/sessions.sqlite3
 ```
 
-Resume restores the saved model and reasoning choice rather than configuration defaults. New Lua configuration and limits apply when the process starts. Ctrl+L creates a new session without deleting the old one. Tools are never replayed during resume. Interrupted runs restore the last completed user prompt and show a warning: local side effects from the discarded incomplete turn may remain. Optimistic revisions prevent simultaneous processes from silently overwriting the same session. Persistence errors stop the turn rather than silently losing history.
+Resume restores the saved model and reasoning choice rather than configuration defaults. New Lua configuration and limits apply when the process starts. Ctrl+L creates a new session without deleting the old one. Tools are never replayed during resume. Each tool batch records its intent before execution, and each mutating call records its result before the next call starts. Interrupted runs recover these records: completed results are retained, unstarted calls have `executed=false`, and calls interrupted before recording a result have `execution=unknown`. Inspect local state before retrying uncertain calls. Session status distinguishes ready, running, failed, and paused work. Legacy checkpoints retain their older recovery boundary. Optimistic revisions prevent simultaneous processes from silently overwriting the same session. Persistence errors stop the turn rather than silently losing history.
 
 ## Project instructions
 

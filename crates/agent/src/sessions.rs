@@ -22,9 +22,54 @@ pub struct SavedSession {
     pub provider: String,
     pub selection: Selection,
     pub interrupted: bool,
+    #[serde(default)]
+    pub status: SessionStatus,
     pub(crate) messages: Vec<Message>,
     pub(crate) stable_len: usize,
     pub(crate) revision: i64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStatus {
+    #[default]
+    Ready,
+    Running,
+    Failed,
+    Paused,
+}
+
+/// Durable intent and results for the currently executing model response.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct ToolJournal {
+    pub messages: Vec<Message>,
+    pub calls: Vec<JournalCall>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct JournalCall {
+    pub id: String,
+    pub started: bool,
+    pub result: Option<String>,
+}
+
+impl ToolJournal {
+    pub fn recover(self) -> Vec<Message> {
+        let mut messages = self.messages;
+        for call in self.calls {
+            messages.push(Message::Tool {
+                tool_call_id: call.id,
+                content: call.result.unwrap_or_else(|| {
+                    if call.started {
+                        serde_json::json!({"execution":"unknown", "error":"Execution was interrupted before its result was saved. Inspect local state before retrying; effects may already exist."}).to_string()
+                    } else {
+                        serde_json::json!({"executed":false, "error":"Tool was not started before the turn stopped."}).to_string()
+                    }
+                }),
+            });
+        }
+        messages
+    }
 }
 
 fn legacy_provider() -> String {
@@ -97,7 +142,10 @@ impl SessionStore {
                 payload TEXT NOT NULL, revision INTEGER NOT NULL,
                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%f','now'))
             );
-            CREATE INDEX IF NOT EXISTS sessions_cwd_updated ON sessions(cwd, updated_at DESC);",
+            CREATE INDEX IF NOT EXISTS sessions_cwd_updated ON sessions(cwd, updated_at DESC);
+            CREATE TABLE IF NOT EXISTS tool_journals (
+                session_id TEXT PRIMARY KEY, payload TEXT NOT NULL
+            );",
         )?;
         Ok(store)
     }
@@ -146,14 +194,15 @@ impl SessionStore {
     pub(crate) async fn save(&self, saved: SavedSession) -> Result<i64> {
         let store = self.clone();
         tokio::task::spawn_blocking(move || {
-            let connection = store.connect()?;
+            let mut connection = store.connect()?;
+            let transaction = connection.transaction()?;
             let title = saved.messages.iter().find_map(|message| match message {
                 Message::User { content } => Some(content.chars().filter(|c| !c.is_control()).take(100).collect::<String>()),
                 _ => None,
             }).unwrap_or_else(|| "New conversation".into());
             let payload = serde_json::to_string(&saved)?;
             let revision = saved.revision.checked_add(1).context("Session revision exhausted")?;
-            let changes = connection.execute("INSERT INTO sessions (id,cwd,title,model,interrupted,payload,revision)
+            let changes = transaction.execute("INSERT INTO sessions (id,cwd,title,model,interrupted,payload,revision)
                 VALUES (?1,?2,?3,?4,?5,?6,?7)
                 ON CONFLICT(id) DO UPDATE SET title=excluded.title,model=excluded.model,
                     interrupted=excluded.interrupted,payload=excluded.payload,revision=excluded.revision,
@@ -161,8 +210,40 @@ impl SessionStore {
                 WHERE sessions.cwd=?2 AND sessions.revision=?8",
                 params![saved.id,store.cwd,title,saved.selection.model,saved.interrupted,payload,revision,saved.revision])?;
             if changes != 1 { bail!("Session changed in another process; resume it again before continuing"); }
+            transaction.execute("DELETE FROM tool_journals WHERE session_id=?1", [&saved.id])?;
+            transaction.commit()?;
             Ok(revision)
         }).await.context("Session database task failed")?
+    }
+
+    pub(crate) async fn journal(
+        &self,
+        id: String,
+        revision: i64,
+        journal: ToolJournal,
+    ) -> Result<()> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut connection = store.connect()?;
+            let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let current: i64 = transaction.query_row("SELECT revision FROM sessions WHERE id=?1 AND cwd=?2", params![id, store.cwd], |row| row.get(0))?;
+            if current != revision {
+                bail!("Session changed in another process; refusing tool execution");
+            }
+            transaction.execute("INSERT INTO tool_journals(session_id,payload) VALUES (?1,?2) ON CONFLICT(session_id) DO UPDATE SET payload=excluded.payload", params![id, serde_json::to_string(&journal)?])?;
+            transaction.commit()?;
+            Ok(())
+        }).await.context("Tool journal task failed")?
+    }
+
+    pub(crate) async fn load_journal(&self, id: String) -> Result<Option<ToolJournal>> {
+        use rusqlite::OptionalExtension as _;
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let connection = store.connect()?;
+            let payload: Option<String> = connection.query_row("SELECT j.payload FROM tool_journals j JOIN sessions s ON s.id=j.session_id WHERE s.id=?1 AND s.cwd=?2", params![id, store.cwd], |row| row.get(0)).optional()?;
+            payload.map(|value| serde_json::from_str(&value).context("Invalid tool journal")).transpose()
+        }).await.context("Tool journal task failed")?
     }
 }
 
@@ -185,6 +266,7 @@ mod tests {
                 reasoning_effort: None,
             },
             interrupted: true,
+            status: SessionStatus::Running,
             messages: vec![Message::User {
                 content: "hello".into(),
             }],

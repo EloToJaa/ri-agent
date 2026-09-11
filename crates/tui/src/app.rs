@@ -115,7 +115,7 @@ impl App {
     }
 
     fn interruption(&mut self) {
-        self.append("INTERRUPTED", "Restored the last completed prompt. No tools were replayed; local tool effects may remain.", Color::Yellow);
+        self.append("INTERRUPTED", "Recovered recorded work without replaying tools. Inspect any uncertain tool effects before continuing.", Color::Yellow);
     }
 
     fn append(&mut self, role: &str, text: &str, color: Color) {

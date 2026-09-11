@@ -1,5 +1,5 @@
 use crate::{message::Message, providers::Completion, tools};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,9 +15,19 @@ pub struct ResponseProcessor {
     output: crate::events::Output,
     lua: Option<std::sync::Arc<crate::config::LuaConfig>>,
     cancellation: crate::cancellation::Cancellation,
+    journal: Option<(crate::sessions::SessionStore, String, i64)>,
 }
 
 impl ResponseProcessor {
+    pub(crate) fn with_journal(
+        mut self,
+        store: Option<&crate::sessions::SessionStore>,
+        id: &str,
+        revision: i64,
+    ) -> Self {
+        self.journal = store.map(|store| (store.clone(), id.to_owned(), revision));
+        self
+    }
     pub(crate) fn with_cancellation(
         mut self,
         cancellation: crate::cancellation::Cancellation,
@@ -47,6 +57,7 @@ impl ResponseProcessor {
             output: crate::events::Output::default(),
             lua: None,
             cancellation: crate::cancellation::Cancellation::default(),
+            journal: None,
         }
     }
 
@@ -84,14 +95,7 @@ impl ResponseProcessor {
             return Ok(TurnOutcome::Finished);
         }
 
-        let results = tools::execute_batch_cancellable(
-            &self.response.tool_calls,
-            self.limits,
-            &self.output,
-            self.lua.as_ref(),
-            &self.cancellation,
-        )
-        .await;
+        let results = self.execute_tools(messages).await?;
         for (call, contents) in self.response.tool_calls.iter().zip(results) {
             self.output.emit(crate::events::Event::Tool(format!(
                 "{} ({}):\n{}",
@@ -102,11 +106,81 @@ impl ResponseProcessor {
                 content: contents,
             });
         }
-
         Ok(if self.cancellation.is_cancelled() {
             TurnOutcome::Cancelled
         } else {
             TurnOutcome::Continue
+        })
+    }
+
+    async fn execute_tools(&self, messages: &mut Vec<Message>) -> Result<Vec<String>> {
+        Ok(if let Some((store, id, revision)) = &self.journal {
+            let mut journal = crate::sessions::ToolJournal {
+                messages: messages.clone(),
+                calls: self
+                    .response
+                    .tool_calls
+                    .iter()
+                    .map(|call| crate::sessions::JournalCall {
+                        id: call.id.clone(),
+                        started: false,
+                        result: None,
+                    })
+                    .collect(),
+            };
+            store
+                .journal(id.clone(), *revision, journal.clone())
+                .await?;
+            let mut results = Vec::new();
+            while results.len() < self.response.tool_calls.len() {
+                let start = results.len();
+                let remaining = self
+                    .response
+                    .tool_calls
+                    .get(start..)
+                    .context("Invalid tool batch")?;
+                let reads = remaining
+                    .iter()
+                    .take_while(|call| call.function.name == "Read")
+                    .count();
+                let end = start + reads.max(1);
+                for entry in journal.calls.iter_mut().take(end).skip(start) {
+                    entry.started = true;
+                }
+                if let Err(error) = store.journal(id.clone(), *revision, journal.clone()).await {
+                    *messages = journal.recover();
+                    return Err(error);
+                }
+                let batch = tools::execute_batch_cancellable(
+                    self.response
+                        .tool_calls
+                        .get(start..end)
+                        .context("Invalid tool batch")?,
+                    self.limits,
+                    &self.output,
+                    self.lua.as_ref(),
+                    &self.cancellation,
+                )
+                .await;
+                for (entry, result) in journal.calls.iter_mut().take(end).skip(start).zip(&batch) {
+                    entry.result = Some(result.clone());
+                }
+                results.extend(batch);
+                if let Err(error) = store.journal(id.clone(), *revision, journal.clone()).await {
+                    *messages = journal.recover();
+                    return Err(error);
+                }
+            }
+            results
+        } else {
+            tools::execute_batch_cancellable(
+                &self.response.tool_calls,
+                self.limits,
+                &self.output,
+                self.lua.as_ref(),
+                &self.cancellation,
+            )
+            .await
         })
     }
 }

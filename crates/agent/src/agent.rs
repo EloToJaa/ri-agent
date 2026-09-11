@@ -5,7 +5,7 @@ use crate::{
     message::Message,
     providers::{CompletionRequest, Provider},
     response_processor::{ResponseProcessor, TurnOutcome},
-    sessions::{SavedSession, SessionStore},
+    sessions::{SavedSession, SessionStatus, SessionStore},
     tools,
 };
 use anyhow::{Context, Result, bail};
@@ -27,6 +27,10 @@ pub struct ContextStats {
 }
 
 const MAX_PROVIDER_ATTEMPTS: usize = 3;
+
+#[derive(Debug, thiserror::Error)]
+#[error("Maximum model turns ({0}) reached")]
+struct TurnLimitReached(usize);
 
 fn retryable_provider_error(error: &anyhow::Error) -> bool {
     let text = format!("{error:#}").to_ascii_lowercase();
@@ -72,6 +76,7 @@ pub struct Session {
     revision: i64,
     skills: crate::skills::Skills,
     instruction_directory: Option<std::path::PathBuf>,
+    status: SessionStatus,
 }
 
 impl Session {
@@ -87,6 +92,7 @@ impl Session {
             revision: 0,
             skills: crate::skills::Skills::default(),
             instruction_directory: None,
+            status: SessionStatus::Ready,
         }
     }
 
@@ -131,6 +137,9 @@ impl Session {
     }
     pub fn id(&self) -> &str {
         &self.id
+    }
+    pub const fn status(&self) -> SessionStatus {
+        self.status
     }
     pub fn selection(&self) -> Selection {
         Selection {
@@ -258,6 +267,7 @@ impl Session {
         self.messages.clear();
         self.id = uuid::Uuid::new_v4().to_string();
         self.revision = 0;
+        self.status = SessionStatus::Ready;
     }
 
     /// Restores a checkpoint, never executing tools. Returns true for an interrupted run.
@@ -275,13 +285,23 @@ impl Session {
             );
         }
         if saved.interrupted {
-            saved.messages.truncate(saved.stable_len);
+            if let Some(journal) = store.load_journal(id.to_owned()).await? {
+                saved.messages = journal.recover();
+            } else {
+                saved.messages.truncate(saved.stable_len);
+            }
+            saved.messages.push(Message::User { content: "[Harness notice: the previous run was interrupted. Completed results were retained. Tools with unknown execution may have changed local state; inspect before retrying.]".into() });
         }
         self.id = saved.id;
         self.messages = saved.messages;
         self.config.model = saved.selection.model;
         self.config.reasoning_effort = saved.selection.reasoning_effort;
         self.revision = saved.revision;
+        self.status = if saved.interrupted {
+            SessionStatus::Paused
+        } else {
+            saved.status
+        };
         Ok(saved.interrupted)
     }
 
@@ -320,6 +340,7 @@ impl Session {
                 provider: self.provider.id().to_owned(),
                 selection: self.selection(),
                 interrupted,
+                status: self.status,
                 messages: self.messages.clone(),
                 stable_len,
                 revision: self.revision,
@@ -329,7 +350,7 @@ impl Session {
         Ok(())
     }
 
-    /// Failed turns are removed from history; local tool side effects are not undone.
+    /// Retain completed tool results on failure; never undo or replay local effects.
     pub async fn submit(&mut self, prompt: String) -> Result<()> {
         self.submit_cancellable(prompt, &crate::cancellation::Cancellation::default())
             .await
@@ -344,10 +365,21 @@ impl Session {
         cancellation: &crate::cancellation::Cancellation,
     ) -> Result<SubmitOutcome> {
         let mut length = self.messages.len();
+        self.status = SessionStatus::Running;
         let result = self.run_turn(prompt, &mut length, cancellation).await;
         if result.is_err() {
             self.output.emit(Event::AssistantAborted);
-            self.messages.truncate(length);
+            crate::message::complete_pending_tools(&mut self.messages);
+            if self
+                .messages
+                .iter()
+                .skip(length)
+                .any(|message| matches!(message, Message::Tool { .. }))
+            {
+                self.messages.push(Message::User { content: "[Harness notice: this turn stopped with an error. Completed tool results and local effects were retained. Inspect uncertain effects before continuing.]".into() });
+            } else {
+                self.messages.truncate(length);
+            }
         }
         if matches!(result, Ok(SubmitOutcome::Cancelled)) {
             self.output.emit(Event::AssistantAborted);
@@ -357,6 +389,14 @@ impl Session {
                 });
             }
         }
+        self.status = match &result {
+            Ok(SubmitOutcome::Completed) => SessionStatus::Ready,
+            Ok(SubmitOutcome::Cancelled) => SessionStatus::Paused,
+            Err(error) if error.downcast_ref::<TurnLimitReached>().is_some() => {
+                SessionStatus::Paused
+            }
+            Err(_) => SessionStatus::Failed,
+        };
         self.checkpoint(false, self.messages.len()).await?;
         if matches!(result, Ok(SubmitOutcome::Cancelled)) {
             self.output.emit(Event::Progress("Turn cancelled. Completed tool effects and results were retained; pending tools were skipped.".into()));
@@ -390,7 +430,7 @@ impl Session {
             return Ok(SubmitOutcome::Cancelled);
         }
         self.messages.push(Message::User { content: prompt });
-        self.checkpoint(true, *stable_len).await?;
+        self.checkpoint(true, self.messages.len()).await?;
         let mut definitions = tools::definitions()
             .into_iter()
             .map(serde_json::to_value)
@@ -426,6 +466,7 @@ impl Session {
                 .with_cancellation(cancellation.clone())
                 .with_limits(self.config.limits)
                 .with_runtime(self.output.clone(), Arc::clone(&self.config.lua))
+                .with_journal(self.store.as_ref(), &self.id, self.revision)
                 .process(&mut self.messages)
                 .await?;
             if outcome == TurnOutcome::Finished {
@@ -434,12 +475,12 @@ impl Session {
             if outcome == TurnOutcome::Cancelled {
                 return Ok(SubmitOutcome::Cancelled);
             }
-            self.checkpoint(true, *stable_len).await?;
+            self.checkpoint(true, self.messages.len()).await?;
             if cancellation.is_cancelled() {
                 return Ok(SubmitOutcome::Cancelled);
             }
         }
-        bail!("Maximum model turns ({}) reached", self.config.max_turns)
+        Err(TurnLimitReached(self.config.max_turns.get()).into())
     }
 
     async fn request_with_retry(
@@ -639,6 +680,105 @@ mod tests {
             },
             output,
         ))
+    }
+
+    #[tokio::test]
+    async fn turn_limit_retains_written_file_and_result_on_resume() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("changed");
+        let provider = Arc::new(CancellationProvider {
+            requests: std::sync::Mutex::default(),
+            pending: false,
+            first: serde_json::json!({"tool_calls":[{"id":"write", "type":"function", "function":{"name":"Write", "arguments":serde_json::json!({"file_path":path,"content":"kept"}).to_string()}}]}),
+        });
+        let store =
+            SessionStore::open(directory.path().join("sessions.sqlite3"), directory.path())?;
+        let mut session =
+            cancellation_session(provider, Output::default())?.with_store(store.clone());
+        session.config.max_turns = NonZeroUsize::MIN;
+        assert!(session.submit("change file".into()).await.is_err());
+        assert_eq!(session.status(), SessionStatus::Paused);
+        assert_eq!(std::fs::read_to_string(&path)?, "kept");
+        let id = session.id.clone();
+        assert!(store.load_journal(id.clone()).await?.is_none());
+        std::fs::remove_file(&path)?;
+        session.resume(&id).await?;
+        assert_eq!(session.status(), SessionStatus::Paused);
+        assert!(session.messages.iter().any(|message| matches!(message, Message::Tool { tool_call_id, .. } if tool_call_id == "write")));
+        assert!(!path.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn interrupted_journal_preserves_results_and_marks_uncertain_and_unstarted_calls()
+    -> Result<()> {
+        use crate::sessions::{JournalCall, ToolJournal};
+        let directory = tempfile::tempdir()?;
+        let store =
+            SessionStore::open(directory.path().join("sessions.sqlite3"), directory.path())?;
+        let mut session = cancellation_session(Arc::new(MockProvider("mock")), Output::default())?
+            .with_store(store.clone());
+        session.messages.push(Message::User {
+            content: "task".into(),
+        });
+        session.checkpoint(true, 1).await?;
+        let calls = ["done", "uncertain", "pending"].map(|id| serde_json::json!({"id":id,"type":"function","function":{"name":"Write","arguments":"{}"}}));
+        let mut messages = session.messages.clone();
+        messages.push(serde_json::from_value(
+            serde_json::json!({"role":"assistant","tool_calls":calls}),
+        )?);
+        store
+            .journal(
+                session.id.clone(),
+                session.revision,
+                ToolJournal {
+                    messages,
+                    calls: vec![
+                        JournalCall {
+                            id: "done".into(),
+                            started: true,
+                            result: Some("written".into()),
+                        },
+                        JournalCall {
+                            id: "uncertain".into(),
+                            started: true,
+                            result: None,
+                        },
+                        JournalCall {
+                            id: "pending".into(),
+                            started: false,
+                            result: None,
+                        },
+                    ],
+                },
+            )
+            .await?;
+        let id = session.id.clone();
+        assert!(session.resume(&id).await?);
+        let history = serde_json::to_value(&session.messages)?;
+        assert_eq!(
+            history.pointer("/2/content"),
+            Some(&serde_json::json!("written"))
+        );
+        let uncertain: serde_json::Value = serde_json::from_str(
+            history
+                .pointer("/3/content")
+                .and_then(serde_json::Value::as_str)
+                .context("uncertain result")?,
+        )?;
+        assert_eq!(
+            uncertain.get("execution"),
+            Some(&serde_json::json!("unknown"))
+        );
+        let pending: serde_json::Value = serde_json::from_str(
+            history
+                .pointer("/4/content")
+                .and_then(serde_json::Value::as_str)
+                .context("pending result")?,
+        )?;
+        assert_eq!(pending.get("executed"), Some(&serde_json::json!(false)));
+        assert_eq!(session.status(), SessionStatus::Paused);
+        Ok(())
     }
 
     #[tokio::test]
@@ -909,7 +1049,7 @@ mod tests {
                     cancellation_session(Arc::new(MockProvider("openrouter")), Output::default())?
                         .with_store(store.clone());
                 assert!(restored.resume(&session.id).await?);
-                assert_eq!(restored.messages.len(), stable);
+                assert_eq!(restored.messages.len(), stable + 1);
             }
         }
         Ok(())

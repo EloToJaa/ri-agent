@@ -199,7 +199,7 @@ async fn main() -> Result<()> {
     }
     if interrupted {
         eprintln!(
-            "Interrupted run: restored the last completed prompt. Local tool effects may remain."
+            "Interrupted run: recovered recorded work without replaying tools. Inspect any uncertain tool effects before continuing."
         );
     }
     if let Some(effort) = session.selection().reasoning_effort {
