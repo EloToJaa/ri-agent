@@ -1,4 +1,5 @@
 mod bash;
+pub mod commands;
 mod discovery;
 mod edit;
 pub use discovery::{FileMatches, find_files};
@@ -44,12 +45,32 @@ pub struct FunctionDefinition {
     parameters: Value,
 }
 
+#[cfg(test)]
 pub async fn execute_batch_cancellable(
     calls: &[ToolCall],
     limits: Limits,
     output: &crate::events::Output,
     lua: Option<&std::sync::Arc<crate::config::LuaConfig>>,
     cancellation: &crate::cancellation::Cancellation,
+) -> Vec<String> {
+    execute_batch_managed(
+        calls,
+        limits,
+        output,
+        lua,
+        cancellation,
+        &commands::Commands::default(),
+    )
+    .await
+}
+
+pub async fn execute_batch_managed(
+    calls: &[ToolCall],
+    limits: Limits,
+    output: &crate::events::Output,
+    lua: Option<&std::sync::Arc<crate::config::LuaConfig>>,
+    cancellation: &crate::cancellation::Cancellation,
+    commands: &commands::Commands,
 ) -> Vec<String> {
     execute_batch_with(calls, |call| async move {
         // Let the frontend process pending input at each tool boundary.
@@ -68,6 +89,10 @@ pub async fn execute_batch_cancellable(
             }
         }
         // Do not drop an in-flight filesystem operation or trusted Lua callback.
+        if call.function.name == "Bash" && call.r#type == "function" && !limits.read_only && !lua.is_some_and(|lua| lua.has_tool("Bash")) {
+            output.emit(crate::events::Event::Progress(format!("Running Bash ({})...", call.id)));
+            return bash::execute_managed(call.function.arguments.as_deref().context("Missing Bash arguments")?, limits, commands, output, cancellation).await;
+        }
         execute_with(call, limits, output, lua).await
     })
         .await

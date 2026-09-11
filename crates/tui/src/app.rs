@@ -174,6 +174,11 @@ impl App {
                 }
             }
             Event::Tool(text) => self.append("TOOL", &text, Color::Rgb(177, 145, 255)),
+            Event::CommandOutput {
+                command_id,
+                stream,
+                text,
+            } => self.append(&format!("{stream} {command_id}"), &text, MUTED),
             Event::Progress(text) => {
                 self.status.clone_from(&text);
                 self.append("ACTIVITY", &text, Color::DarkGray);

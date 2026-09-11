@@ -81,6 +81,7 @@ pub struct Session {
     artifacts: Option<crate::artifacts::Artifacts>,
     context_window: Option<NonZeroUsize>,
     response_reserve: NonZeroUsize,
+    commands: Arc<tools::commands::Commands>,
 }
 
 impl Session {
@@ -100,6 +101,7 @@ impl Session {
             artifacts: None,
             context_window: None,
             response_reserve: NonZeroUsize::MIN.saturating_add(8191),
+            commands: Arc::default(),
         }
     }
 
@@ -378,6 +380,7 @@ impl Session {
     }
 
     pub fn clear(&mut self) {
+        self.commands = Arc::default();
         self.messages.clear();
         self.id = uuid::Uuid::new_v4().to_string();
         self.revision = 0;
@@ -407,6 +410,7 @@ impl Session {
             saved.messages.push(Message::User { content: "[Harness notice: the previous run was interrupted. Completed results were retained. Tools with unknown execution may have changed local state; inspect before retrying.]".into() });
         }
         self.id = saved.id;
+        self.commands = Arc::default();
         self.messages = saved.messages;
         self.config.model = saved.selection.model;
         self.config.reasoning_effort = saved.selection.reasoning_effort;
@@ -581,6 +585,7 @@ impl Session {
                 .with_limits(self.config.limits)
                 .with_runtime(self.output.clone(), Arc::clone(&self.config.lua))
                 .with_journal(self.store.as_ref(), &self.id, self.revision)
+                .with_commands(self.commands.clone())
                 .process(&mut self.messages)
                 .await?;
             if outcome == TurnOutcome::Finished {
@@ -1078,7 +1083,7 @@ mod tests {
         assert_eq!(results.first().map(|result| result.0), Some("kept"));
         let active: serde_json::Value =
             serde_json::from_str(results.get(1).context("Missing active tool result")?.1)?;
-        assert_eq!(active.get("success"), Some(&json!(true)));
+        assert_eq!(active.get("cancelled"), Some(&json!(true)));
         let skipped_result: serde_json::Value =
             serde_json::from_str(results.get(2).context("Missing skipped result")?.1)?;
         assert_eq!(skipped_result.get("executed"), Some(&json!(false)));

@@ -14,6 +14,11 @@ pub enum Event {
     AssistantDelta(String),
     AssistantAborted,
     Tool(String),
+    CommandOutput {
+        command_id: String,
+        stream: String,
+        text: String,
+    },
 }
 
 #[derive(Debug)]
@@ -95,11 +100,19 @@ impl Output {
                 }
                 Event::AssistantAborted => serde_json::json!({"type":"assistant_aborted"}),
                 Event::Tool(text) => serde_json::json!({"type":"tool","text":text}),
+                Event::CommandOutput {
+                    command_id,
+                    stream,
+                    text,
+                } => {
+                    serde_json::json!({"type":"command_output", "command_id":command_id, "stream":stream, "text":text})
+                }
             };
             println!("{value}");
             return;
         }
         match event {
+            Event::CommandOutput { text, .. } => eprint!("{text}"),
             Event::Progress(text) => eprintln!("{text}"),
             Event::AssistantDelta(text) => {
                 self.streamed

@@ -1,24 +1,80 @@
 use super::{Tool, ToolFuture};
 use crate::limits::Limits;
-use anyhow::Context;
-use serde::{Deserialize, Serialize};
+use anyhow::{Context, bail};
+use serde::Deserialize;
 use serde_json::{Value, json};
-use std::process::Stdio;
-use tokio::process::Command;
+use std::{path::PathBuf, time::Duration};
 
 pub(super) struct Bash;
 
 #[derive(Deserialize)]
 struct Arguments {
-    command: String,
+    command: Option<String>,
+    command_id: Option<String>,
+    #[serde(default)]
+    action: Action,
+    yield_time_ms: Option<u64>,
+    timeout_ms: Option<u64>,
+    cwd: Option<PathBuf>,
 }
 
-#[derive(Serialize)]
-struct BashOutput {
-    stdout: String,
-    stderr: String,
-    exit_code: Option<i32>,
-    success: bool,
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Action {
+    #[default]
+    Start,
+    Poll,
+    Cancel,
+}
+
+pub(super) async fn execute_managed(
+    arguments: &str,
+    mut limits: Limits,
+    commands: &super::commands::Commands,
+    output: &crate::events::Output,
+    cancellation: &crate::cancellation::Cancellation,
+) -> anyhow::Result<String> {
+    let args: Arguments = serde_json::from_str(arguments).context("Invalid Bash arguments")?;
+    if let Some(timeout) = args.timeout_ms {
+        if timeout == 0 || timeout > 43_200_000 {
+            bail!("timeout_ms must be between 1 and 43200000");
+        }
+        limits.command_timeout = Duration::from_millis(timeout);
+    }
+    let wait = args.yield_time_ms.map_or(
+        limits.command_timeout + Duration::from_secs(2),
+        Duration::from_millis,
+    );
+    if args.yield_time_ms.is_some_and(|value| value > 60_000) {
+        bail!("yield_time_ms must be at most 60000; use poll for longer commands");
+    }
+    let (id, cancel) = match args.action {
+        Action::Start => {
+            if args.command_id.is_some() {
+                bail!("start does not accept command_id");
+            }
+            (
+                commands.start(
+                    args.command.as_deref().context("Missing Bash command")?,
+                    args.cwd.as_deref(),
+                    limits,
+                    output,
+                )?,
+                false,
+            )
+        }
+        Action::Poll | Action::Cancel => {
+            if args.command.is_some() || args.cwd.is_some() || args.timeout_ms.is_some() {
+                bail!("poll/cancel only accept command_id and yield_time_ms");
+            }
+            (
+                args.command_id.context("Missing command_id")?,
+                matches!(args.action, Action::Cancel),
+            )
+        }
+    };
+    serde_json::to_string(&commands.poll(&id, wait, cancel, cancellation).await?)
+        .context("Failed to serialize Bash output")
 }
 
 impl Tool for Bash {
@@ -27,56 +83,36 @@ impl Tool for Bash {
     }
 
     fn description(&self) -> &'static str {
-        "Execute a Bash command in the current working directory and return stdout, stderr, and exit status. Each call starts a new shell with no interactive input."
+        "Run Bash with optional cwd/timeout_ms. Set yield_time_ms (0-60000) to return a command_id while it runs; action=poll retrieves new output and action=cancel stops it. Handles belong to this session/process. Each start uses a new shell without interactive input."
     }
 
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
+                "action": {"type":"string", "enum":["start","poll","cancel"]},
+                "command_id": {"type":"string"},
+                "yield_time_ms": {"type":"integer", "minimum":0,"maximum":60000},
+                "timeout_ms": {"type":"integer", "minimum":1,"maximum":43_200_000},
+                "cwd": {"type":"string"},
                 "command": {
                     "type": "string",
                     "description": "The Bash command to execute"
                 }
-            },
-            "required": ["command"]
+            }
         })
     }
 
     fn execute<'a>(&'a self, arguments: &'a str, limits: Limits) -> ToolFuture<'a> {
         Box::pin(async move {
-            let arguments: Arguments =
-                serde_json::from_str(arguments).context("Invalid Bash arguments")?;
-            let mut child = Command::new("bash")
-                .arg("-c")
-                .arg(arguments.command)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true)
-                .spawn()
-                .context("Failed to execute Bash command")?;
-            let stdout = child.stdout.take().context("Missing Bash stdout")?;
-            let stderr = child.stderr.take().context("Missing Bash stderr")?;
-            let (status, stdout, stderr) =
-                Box::pin(tokio::time::timeout(limits.command_timeout, async {
-                    tokio::try_join!(
-                        async { child.wait().await.context("Failed to wait for Bash") },
-                        crate::limits::read_output(stdout, limits.max_output_bytes),
-                        crate::limits::read_output(stderr, limits.max_output_bytes),
-                    )
-                }))
-                .await
-                .context("Bash command timed out")??;
-
-            // A failed command is a tool result the model can inspect and act on.
-            serde_json::to_string(&BashOutput {
-                stdout,
-                stderr,
-                exit_code: status.code(),
-                success: status.success(),
-            })
-            .context("Failed to serialize Bash output")
+            execute_managed(
+                arguments,
+                limits,
+                &super::commands::Commands::default(),
+                &crate::events::Output::default(),
+                &crate::cancellation::Cancellation::default(),
+            )
+            .await
         })
     }
 }
@@ -98,20 +134,18 @@ mod tests {
         let output = execute(
             "value=hello; printf '%s' \"$value\" | while read -r -n 1 char; do printf '%s' \"$char\"; done",
         ).await?;
-        assert_eq!(
-            output,
-            json!({"stdout": "hello", "stderr": "", "exit_code": 0, "success": true})
-        );
+        assert_eq!(output.get("stdout"), Some(&json!("hello")));
+        assert_eq!(output.get("exit_code"), Some(&json!(0)));
+        assert_eq!(output.get("running"), Some(&json!(false)));
         Ok(())
     }
 
     #[tokio::test]
     async fn returns_stderr_and_nonzero_status_as_a_tool_result() -> anyhow::Result<()> {
         let output = execute("printf 'failed' >&2; exit 7").await?;
-        assert_eq!(
-            output,
-            json!({"stdout": "", "stderr": "failed", "exit_code": 7, "success": false})
-        );
+        assert_eq!(output.get("stderr"), Some(&json!("failed")));
+        assert_eq!(output.get("exit_code"), Some(&json!(7)));
+        assert_eq!(output.get("success"), Some(&json!(false)));
         Ok(())
     }
 
@@ -123,12 +157,13 @@ mod tests {
             read_only: false,
             ask: false,
         };
-        let error = Bash
+        let result = Bash
             .execute(r#"{"command":"exec sleep 5"}"#, limits)
-            .await
-            .err()
-            .context("Expected a timeout")?;
-        assert!(error.to_string().contains("timed out"));
+            .await?;
+        assert_eq!(
+            serde_json::from_str::<Value>(&result)?.get("timed_out"),
+            Some(&json!(true))
+        );
         let result = Bash
             .execute(
                 r#"{"command":"printf abcdef; printf ghijkl >&2"}"#,

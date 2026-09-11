@@ -16,9 +16,17 @@ pub struct ResponseProcessor {
     lua: Option<std::sync::Arc<crate::config::LuaConfig>>,
     cancellation: crate::cancellation::Cancellation,
     journal: Option<(crate::sessions::SessionStore, String, i64)>,
+    commands: std::sync::Arc<tools::commands::Commands>,
 }
 
 impl ResponseProcessor {
+    pub(crate) fn with_commands(
+        mut self,
+        commands: std::sync::Arc<tools::commands::Commands>,
+    ) -> Self {
+        self.commands = commands;
+        self
+    }
     pub(crate) fn with_journal(
         mut self,
         store: Option<&crate::sessions::SessionStore>,
@@ -58,6 +66,7 @@ impl ResponseProcessor {
             lua: None,
             cancellation: crate::cancellation::Cancellation::default(),
             journal: None,
+            commands: std::sync::Arc::default(),
         }
     }
 
@@ -151,7 +160,7 @@ impl ResponseProcessor {
                     *messages = journal.recover();
                     return Err(error);
                 }
-                let batch = tools::execute_batch_cancellable(
+                let batch = tools::execute_batch_managed(
                     self.response
                         .tool_calls
                         .get(start..end)
@@ -160,6 +169,7 @@ impl ResponseProcessor {
                     &self.output,
                     self.lua.as_ref(),
                     &self.cancellation,
+                    &self.commands,
                 )
                 .await;
                 for (entry, result) in journal.calls.iter_mut().take(end).skip(start).zip(&batch) {
@@ -173,12 +183,13 @@ impl ResponseProcessor {
             }
             results
         } else {
-            tools::execute_batch_cancellable(
+            tools::execute_batch_managed(
                 &self.response.tool_calls,
                 self.limits,
                 &self.output,
                 self.lua.as_ref(),
                 &self.cancellation,
+                &self.commands,
             )
             .await
         })
