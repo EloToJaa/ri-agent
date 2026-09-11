@@ -156,6 +156,9 @@ impl App {
                 self.scroll_back = 0;
                 self.append("APPROVAL", &format!("{} ({})\n{}\nPress y to approve, n or Esc to deny. Scroll to review arguments.", request.tool.escape_debug(), request.id.escape_debug(), request.arguments.escape_debug()), WARNING);
                 self.status = "Approval required: y / n".into();
+                if let Some(preview) = &request.preview {
+                    self.append("PROPOSED CHANGE", preview, WARNING);
+                }
                 self.approval = Some(request);
             }
             Event::User(text) => self.append("YOU", &text, ACCENT),
@@ -1073,6 +1076,7 @@ mod tests {
                 tool: "Bash".into(),
                 id: "call".into(),
                 arguments: "{}".into(),
+                preview: None,
                 response,
             }));
             let (sender, _) = mpsc::unbounded_channel();

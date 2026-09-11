@@ -91,6 +91,10 @@ Resume restores the saved model and reasoning choice rather than configuration d
 
 ## Project instructions
 
+Read supports `start_line` (1-based), `max_lines`, and byte `offset`. Ranged reads return JSON with `content`, `next_offset`, and a truncation flag; follow `next_offset` to continue. `include_hash=true` also returns the full-file `sha256` for UTF-8 files up to 16 MiB. Supply it as `expected_sha256` to Edit or Write to reject changes since the read; Write accepts `"missing"` to require a new file.
+
+Write and Edit prepare a unified diff before approval, then recheck the file contents, target, and permissions immediately before publishing an atomic replacement. Changes during approval fail instead of overwriting the new contents. Existing permissions and symlink targets are preserved; new files are private. Creation refuses to clobber a file that appeared concurrently. Atomic replacement protects against partial writes, but the content check is not a filesystem compare-and-swap: another process can still race between that check and rename. File mutations are limited to regular UTF-8 files and 16 MiB. Atomic replacement creates a new inode and does not preserve hard-link relationships or extended attributes.
+
 Before each submitted prompt, the CLI and TUI reload `AGENTS.md` files from the nearest ancestor containing `.git` (a directory or worktree file) down to the launch directory, plus nested instruction files below the launch directory. Without a Git root, discovery starts at the launch directory. Sibling directories outside that subtree are not scanned.
 
 Each document is labeled with its path and scope. Rules apply to its containing directory and descendants; deeper rules override ancestor rules only within their subtree. Explicit user requests take precedence. These are instructions for the model, not a filesystem permission boundary. Documents are appended after skill expansion and the Lua `before_prompt` hook, so mentions such as `$name` inside `AGENTS.md` do not invoke skills. Loading instructions executes no code and does not alter the files.

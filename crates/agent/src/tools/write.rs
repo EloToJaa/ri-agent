@@ -4,6 +4,7 @@ use anyhow::Context;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::PathBuf;
+#[cfg(test)]
 use tokio::fs;
 
 pub(super) struct Write;
@@ -12,6 +13,27 @@ pub(super) struct Write;
 struct Arguments {
     file_path: PathBuf,
     content: String,
+    expected_sha256: Option<String>,
+}
+
+pub(super) async fn prepare(
+    arguments: &str,
+    limits: Limits,
+) -> anyhow::Result<super::files::Mutation> {
+    let args: Arguments = serde_json::from_str(arguments).context("Invalid Write arguments")?;
+    let snapshot = super::files::Snapshot::read(
+        args.file_path.clone(),
+        true,
+        args.expected_sha256.as_deref(),
+    )
+    .await?;
+    let patch = super::edit::diff(
+        &args.file_path.to_string_lossy(),
+        snapshot.content.as_deref().unwrap_or_default(),
+        &args.content,
+    );
+    let patch = crate::limits::read_output(patch.as_bytes(), limits.max_output_bytes).await?;
+    snapshot.prepare(args.content, format!("File written successfully\n{patch}"))
 }
 
 impl Tool for Write {
@@ -27,6 +49,7 @@ impl Tool for Write {
         json!({
             "type": "object",
             "properties": {
+                "expected_sha256": {"type":"string", "description":"Read's sha256, or missing to require a new file"},
                 "file_path": {
                     "type": "string",
                     "description": "The path to the file to write"
@@ -40,15 +63,8 @@ impl Tool for Write {
         })
     }
 
-    fn execute<'a>(&'a self, arguments: &'a str, _limits: Limits) -> ToolFuture<'a> {
-        Box::pin(async move {
-            let arguments: Arguments =
-                serde_json::from_str(arguments).context("Invalid Write arguments")?;
-            fs::write(&arguments.file_path, arguments.content)
-                .await
-                .with_context(|| format!("Failed to write {}", arguments.file_path.display()))?;
-            Ok("File written successfully".to_string())
-        })
+    fn execute<'a>(&'a self, arguments: &'a str, limits: Limits) -> ToolFuture<'a> {
+        Box::pin(async move { prepare(arguments, limits).await?.apply().await })
     }
 }
 
@@ -72,7 +88,7 @@ mod tests {
                     Limits::default(),
                 )
                 .await;
-            assert_eq!(result?, "File written successfully");
+            assert!(result?.starts_with("File written successfully"));
             assert_eq!(fs::read_to_string(&path).await?, content);
         }
 

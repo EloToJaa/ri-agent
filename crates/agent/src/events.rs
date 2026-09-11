@@ -26,6 +26,7 @@ pub struct ApprovalRequest {
     pub tool: String,
     pub id: String,
     pub arguments: String,
+    pub preview: Option<String>,
     pub response: tokio::sync::oneshot::Sender<bool>,
 }
 
@@ -37,12 +38,13 @@ pub struct Output {
 }
 
 impl Output {
-    pub async fn approve(&self, call: &crate::response::ToolCall) -> bool {
+    pub async fn approve(&self, call: &crate::response::ToolCall, preview: Option<String>) -> bool {
         let (response, receiver) = tokio::sync::oneshot::channel();
         let request = ApprovalRequest {
             tool: call.function.name.clone(),
             id: call.id.clone(),
             arguments: call.function.arguments.clone().unwrap_or_default(),
+            preview,
             response,
         };
         if let Some(sender) = &self.sender {
@@ -63,6 +65,11 @@ impl Output {
                 request.id.escape_debug(),
                 request.arguments.escape_debug()
             );
+            if let Some(preview) = &request.preview {
+                for line in preview.lines() {
+                    eprintln!("{}", line.escape_debug());
+                }
+            }
             eprint!("Type yes to execute: ");
             let _ = std::io::stderr().flush();
             let mut answer = String::new();

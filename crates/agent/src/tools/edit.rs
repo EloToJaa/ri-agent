@@ -4,6 +4,7 @@ use anyhow::Context;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{fmt::Write as _, path::PathBuf};
+#[cfg(test)]
 use tokio::fs;
 
 pub(super) struct Edit;
@@ -14,6 +15,7 @@ struct Arguments {
     file_path: PathBuf,
     old_string: String,
     new_string: String,
+    expected_sha256: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -46,7 +48,7 @@ fn replace(source: &str, old: &str, new: &str) -> Result<String, EditError> {
 
 // A single replacement needs one hunk. Preserve line endings and explicitly mark
 // missing final newlines so the displayed change is not misleading.
-fn diff(path: &str, before: &str, after: &str) -> String {
+pub(super) fn diff(path: &str, before: &str, after: &str) -> String {
     let old: Vec<_> = before.split_inclusive('\n').collect();
     let new: Vec<_> = after.split_inclusive('\n').collect();
     let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
@@ -94,6 +96,24 @@ fn diff(path: &str, before: &str, after: &str) -> String {
     result
 }
 
+pub(super) async fn prepare(
+    arguments: &str,
+    limits: Limits,
+) -> anyhow::Result<super::files::Mutation> {
+    let args: Arguments = serde_json::from_str(arguments).context("Invalid Edit arguments")?;
+    let snapshot = super::files::Snapshot::read(
+        args.file_path.clone(),
+        false,
+        args.expected_sha256.as_deref(),
+    )
+    .await?;
+    let source = snapshot.content.as_deref().context("Missing edit source")?;
+    let edited = replace(source, &args.old_string, &args.new_string)?;
+    let patch = diff(&args.file_path.to_string_lossy(), source, &edited);
+    let patch = read_output(patch.as_bytes(), limits.max_output_bytes).await?;
+    snapshot.prepare(edited, format!("File edited successfully\n{patch}"))
+}
+
 impl Tool for Edit {
     fn name(&self) -> &'static str {
         "Edit"
@@ -106,26 +126,14 @@ impl Tool for Edit {
     fn parameters(&self) -> Value {
         json!({"type": "object", "properties": {
             "file_path": {"type": "string", "description": "Path to the existing file"},
+            "expected_sha256": {"type":"string", "description":"File hash returned by Read(include_hash=true); rejects stale edits"},
             "old_string": {"type": "string", "description": "Nonempty exact text occurring once"},
             "new_string": {"type": "string", "description": "Replacement text; empty deletes the match"}
         }, "required": ["file_path", "old_string", "new_string"], "additionalProperties": false})
     }
 
     fn execute<'a>(&'a self, arguments: &'a str, limits: Limits) -> ToolFuture<'a> {
-        Box::pin(async move {
-            let args: Arguments =
-                serde_json::from_str(arguments).context("Invalid Edit arguments")?;
-            let source = fs::read_to_string(&args.file_path)
-                .await
-                .with_context(|| format!("Failed to read {}", args.file_path.display()))?;
-            let edited = replace(&source, &args.old_string, &args.new_string)?;
-            let patch = diff(&args.file_path.to_string_lossy(), &source, &edited);
-            let patch = read_output(patch.as_bytes(), limits.max_output_bytes).await?;
-            fs::write(&args.file_path, edited)
-                .await
-                .with_context(|| format!("Failed to edit {}", args.file_path.display()))?;
-            Ok(format!("File edited successfully\n{patch}"))
-        })
+        Box::pin(async move { prepare(arguments, limits).await?.apply().await })
     }
 }
 

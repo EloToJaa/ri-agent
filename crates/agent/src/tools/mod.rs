@@ -2,6 +2,7 @@ mod bash;
 pub mod commands;
 mod discovery;
 mod edit;
+mod files;
 pub use discovery::{FileMatches, find_files};
 mod read;
 mod write;
@@ -78,16 +79,24 @@ pub async fn execute_batch_managed(
         if cancellation.is_cancelled() {
             return Ok(json!({"cancelled":true,"executed":false,"error":"Tool skipped because the user cancelled the turn"}).to_string());
         }
+        let mutation = if !limits.read_only && call.r#type == "function" && !lua.is_some_and(|lua| lua.has_tool(&call.function.name)) {
+            match call.function.name.as_str() {
+                "Edit" => Some(edit::prepare(call.function.arguments.as_deref().context("Missing Edit arguments")?, limits).await?),
+                "Write" => Some(write::prepare(call.function.arguments.as_deref().context("Missing Write arguments")?, limits).await?),
+                _ => None,
+            }
+        } else { None };
         if limits.ask && !limits.read_only && !matches!(call.function.name.as_str(), "Read" | "Search" | "Find") {
             let approved = tokio::select! {
                 biased;
                 () = cancellation.cancelled() => false,
-                approved = output.approve(call) => approved,
+                approved = output.approve(call, mutation.as_ref().map(|mutation| mutation.result.lines().skip(1).collect::<Vec<_>>().join("\n"))) => approved,
             };
             if !approved || cancellation.is_cancelled() {
                 return Ok(json!({"executed":false,"cancelled":cancellation.is_cancelled(),"error":"Tool approval denied"}).to_string());
             }
         }
+        if let Some(mutation) = mutation { return mutation.apply().await; }
         // Do not drop an in-flight filesystem operation or trusted Lua callback.
         if call.function.name == "Bash" && call.r#type == "function" && !limits.read_only && !lua.is_some_and(|lua| lua.has_tool("Bash")) {
             output.emit(crate::events::Event::Progress(format!("Running Bash ({})...", call.id)));
