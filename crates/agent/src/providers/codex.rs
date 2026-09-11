@@ -150,7 +150,11 @@ impl Provider for Codex {
     }
 
     fn complete<'a>(&'a self, request: CompletionRequest<'a>) -> ProviderFuture<'a, Completion> {
-        self.completion(request, None)
+        Box::pin(async move {
+            self.completion(request, None)
+                .await
+                .map_err(super::ProviderError::normalize)
+        })
     }
 
     fn complete_stream<'a>(
@@ -158,7 +162,11 @@ impl Provider for Codex {
         request: CompletionRequest<'a>,
         output: &'a crate::events::Output,
     ) -> ProviderFuture<'a, Completion> {
-        self.completion(request, Some(output))
+        Box::pin(async move {
+            self.completion(request, Some(output))
+                .await
+                .map_err(super::ProviderError::normalize)
+        })
     }
 }
 
@@ -202,9 +210,10 @@ impl Codex {
                 .json(&body)
                 .send()
                 .await
-                .context("Requesting OpenAI Codex completion")?
-                .error_for_status()
-                .context("OpenAI Codex completion failed")?;
+                .context("Requesting OpenAI Codex completion")?;
+            if !response.status().is_success() {
+                return Err(super::ProviderError::http(&response).into());
+            }
             let mut part = None;
             super::sse::read(response, |data| stream_event(data, output, &mut part)).await
         })
@@ -255,9 +264,38 @@ fn stream_event(
             }
             Ok(Some(completion))
         }
-        Some("error" | "response.failed" | "response.incomplete") => {
-            bail!("OpenAI Codex response failed or was incomplete")
+        Some("response.incomplete") => {
+            let response = event
+                .get("response")
+                .context("Incomplete event is missing its response")?;
+            let reason = match response
+                .pointer("/incomplete_details/reason")
+                .and_then(Value::as_str)
+            {
+                Some("max_output_tokens") => super::FinishReason::Length,
+                Some("content_filter") => super::FinishReason::ContentFilter,
+                _ => super::FinishReason::Incomplete,
+            };
+            Ok(Some(Completion {
+                content: None,
+                reasoning: None,
+                reasoning_details: None,
+                tool_calls: Vec::new(),
+                usage: response
+                    .get("usage")
+                    .filter(|usage| !usage.is_null())
+                    .map(|usage| serde_json::from_value(usage.clone()))
+                    .transpose()?,
+                finish_reason: reason,
+            }))
         }
+        Some("error" | "response.failed") => Err(super::ProviderError::stream(
+            event
+                .pointer("/response/error")
+                .or_else(|| event.get("error"))
+                .unwrap_or(&event),
+        )
+        .into()),
         _ => Ok(None),
     }
 }
@@ -320,6 +358,16 @@ fn parse_response(value: &Value) -> Result<Completion> {
         }
     }
     Ok(Completion {
+        usage: value
+            .get("usage")
+            .filter(|usage| !usage.is_null())
+            .map(|usage| serde_json::from_value(usage.clone()))
+            .transpose()?,
+        finish_reason: if tool_calls.is_empty() {
+            super::FinishReason::Stop
+        } else {
+            super::FinishReason::ToolCalls
+        },
         content: (!text.is_empty()).then(|| text.join("\n")),
         reasoning: (!reasoning.is_empty()).then(|| reasoning.join("\n")),
         reasoning_details: None,
@@ -331,6 +379,16 @@ fn parse_response(value: &Value) -> Result<Completion> {
 mod tests {
     use super::*;
     use crate::providers::ReasoningEffort;
+
+    #[test]
+    fn incomplete_response_reports_usage_and_output_limit() -> Result<()> {
+        let event = json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":20,"output_tokens":10}}});
+        let result = stream_event(&event.to_string(), None, &mut None)?.context("completion")?;
+        assert_eq!(result.finish_reason, super::super::FinishReason::Length);
+        assert!(result.tool_calls.is_empty());
+        assert_eq!(result.usage.context("usage")?.output_tokens, 10);
+        Ok(())
+    }
 
     #[test]
     fn streams_text_parts_and_returns_only_authoritative_completed_tools() -> Result<()> {

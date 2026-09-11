@@ -1,13 +1,17 @@
 //! Provider-neutral chat and model discovery boundary and provider implementations.
 pub mod codex;
+mod errors;
 pub mod openrouter;
 mod sse;
+mod usage;
 pub use crate::config::ReasoningEffort;
 pub use crate::message::Message as ChatMessage;
 pub use crate::response::{Message as Completion, ToolCall, ToolCallFunction};
 use anyhow::{Context, Result, bail};
+pub use errors::ProviderError;
 use serde::{Deserialize, Deserializer};
 use std::{future::Future, pin::Pin};
+pub use usage::{FinishReason, Metrics, TokenUsage};
 
 /// Connect using environment/saved credentials, preserving the configured `OpenRouter` endpoint.
 pub fn connect(id: &str, openrouter_base_url: &str) -> Result<std::sync::Arc<dyn Provider>> {
@@ -66,6 +70,7 @@ pub struct CompletionRequest<'a> {
     pub model: &'a str,
     pub tools: &'a [serde_json::Value],
     pub reasoning_effort: Option<ReasoningEffort>,
+    pub max_output_tokens: usize,
 }
 
 /// Implementations translate the shared protocol into their upstream API format.

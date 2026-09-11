@@ -24,6 +24,8 @@ pub struct SavedSession {
     pub interrupted: bool,
     #[serde(default)]
     pub status: SessionStatus,
+    #[serde(default)]
+    pub metrics: crate::providers::Metrics,
     pub(crate) messages: Vec<Message>,
     pub(crate) stable_len: usize,
     pub(crate) revision: i64,
@@ -270,6 +272,7 @@ mod tests {
             },
             interrupted: true,
             status: SessionStatus::Running,
+            metrics: crate::providers::Metrics::default(),
             messages: vec![Message::User {
                 content: "hello".into(),
             }],

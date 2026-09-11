@@ -6,6 +6,11 @@ use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Debug)]
 pub enum Event {
+    ModelRequest {
+        usage: Option<crate::providers::TokenUsage>,
+        finish_reason: Option<crate::providers::FinishReason>,
+        elapsed_ms: u64,
+    },
     Approval(ApprovalRequest),
     User(String),
     Progress(String),
@@ -98,6 +103,13 @@ impl Output {
         }
         if self.json {
             let value = match event {
+                Event::ModelRequest {
+                    usage,
+                    finish_reason,
+                    elapsed_ms,
+                } => {
+                    serde_json::json!({"type":"model_request", "usage":usage, "finish_reason":finish_reason, "elapsed_ms":elapsed_ms})
+                }
                 Event::Approval(_) => return,
                 Event::User(text) => serde_json::json!({"type":"user","text":text}),
                 Event::Progress(text) => serde_json::json!({"type":"progress","text":text}),
@@ -119,6 +131,18 @@ impl Output {
             return;
         }
         match event {
+            Event::ModelRequest {
+                usage,
+                finish_reason,
+                elapsed_ms,
+            } => {
+                if let Some(usage) = usage {
+                    eprintln!(
+                        "Model: {} input / {} output tokens, {elapsed_ms} ms, {finish_reason:?}",
+                        usage.input_tokens, usage.output_tokens
+                    );
+                }
+            }
             Event::CommandOutput { text, .. } => eprint!("{text}"),
             Event::Progress(text) => eprintln!("{text}"),
             Event::AssistantDelta(text) => {

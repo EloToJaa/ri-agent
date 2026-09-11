@@ -161,7 +161,11 @@ impl Provider for OpenRouter {
     }
 
     fn complete<'a>(&'a self, request: CompletionRequest<'a>) -> ProviderFuture<'a, Completion> {
-        self.completion(request, None)
+        Box::pin(async move {
+            self.completion(request, None)
+                .await
+                .map_err(super::ProviderError::normalize)
+        })
     }
 
     fn complete_stream<'a>(
@@ -169,7 +173,11 @@ impl Provider for OpenRouter {
         request: CompletionRequest<'a>,
         output: &'a crate::events::Output,
     ) -> ProviderFuture<'a, Completion> {
-        self.completion(request, Some(output))
+        Box::pin(async move {
+            self.completion(request, Some(output))
+                .await
+                .map_err(super::ProviderError::normalize)
+        })
     }
 }
 
@@ -190,6 +198,9 @@ impl OpenRouter {
                 messages: &'a [crate::providers::ChatMessage],
                 model: &'a str,
                 tools: &'a [serde_json::Value],
+                max_tokens: usize,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                stream_options: Option<serde_json::Value>,
                 #[serde(skip_serializing_if = "Option::is_none")]
                 reasoning: Option<Reasoning>,
             }
@@ -202,16 +213,15 @@ impl OpenRouter {
                     messages: request.messages,
                     model: request.model,
                     tools: request.tools,
+                    max_tokens: request.max_output_tokens,
+                    stream_options: output.map(|_| serde_json::json!({"include_usage":true})),
                     reasoning: request.reasoning_effort.map(|effort| Reasoning { effort }),
                 })
                 .send()
                 .await
                 .context("Requesting OpenRouter completion")?;
             if !response.status().is_success() {
-                bail!(
-                    "OpenRouter completion failed (HTTP {}); check credentials, model access, and available credits",
-                    response.status()
-                );
+                return Err(super::ProviderError::http(&response).into());
             }
             if response
                 .headers()
@@ -232,18 +242,28 @@ impl OpenRouter {
                 .json()
                 .await
                 .context("Invalid OpenRouter completion response")?;
-            response
+            let mut choice = response
                 .choices
                 .into_iter()
                 .next()
-                .map(|choice| choice.message)
-                .context("Response contains no choices")
+                .context("Response contains no choices")?;
+            choice.message.usage = response.usage;
+            if choice.finish_reason == Some(super::FinishReason::Unknown) {
+                return Err(super::ProviderError::Protocol(
+                    "Unrecognized completion finish reason".into(),
+                )
+                .into());
+            }
+            choice.message.finish_reason = choice.finish_reason.unwrap_or_default();
+            Ok(choice.message)
         })
     }
 }
 
 #[derive(Default)]
 struct StreamCompletion {
+    usage: Option<super::TokenUsage>,
+    finish_reason: super::FinishReason,
     content: Option<String>,
     reasoning: Option<String>,
     reasoning_details: Vec<serde_json::Value>,
@@ -253,6 +273,7 @@ struct StreamCompletion {
 
 #[derive(Deserialize)]
 struct StreamChunk {
+    usage: Option<super::TokenUsage>,
     #[serde(default)]
     choices: Vec<StreamChoice>,
     error: Option<serde_json::Value>,
@@ -305,7 +326,12 @@ impl StreamCompletion {
             if !self.finished {
                 bail!("OpenRouter stream ended without a finish reason");
             }
-            for call in self.calls.values() {
+            for call in self.calls.values().filter(|_| {
+                matches!(
+                    self.finish_reason,
+                    super::FinishReason::Stop | super::FinishReason::ToolCalls
+                )
+            }) {
                 if call.id.is_empty() || call.function.name.is_empty() || call.r#type != "function"
                 {
                     bail!("OpenRouter stream contains an incomplete tool call");
@@ -319,6 +345,8 @@ impl StreamCompletion {
                 .context("Streamed tool call has incomplete JSON arguments")?;
             }
             return Ok(Some(Completion {
+                usage: self.usage.take(),
+                finish_reason: self.finish_reason,
                 content: self.content.take(),
                 reasoning: self.reasoning.take(),
                 reasoning_details: (!self.reasoning_details.is_empty())
@@ -328,17 +356,29 @@ impl StreamCompletion {
         }
         let chunk: StreamChunk =
             serde_json::from_str(data).context("Invalid OpenRouter stream event")?;
-        if chunk.error.is_some() {
-            bail!("OpenRouter reported an error during streaming");
+        if let Some(error) = chunk.error {
+            return Err(super::ProviderError::stream(&error).into());
+        }
+        if chunk.usage.is_some() {
+            self.usage = chunk.usage;
         }
         for choice in chunk.choices.into_iter().filter(|choice| choice.index == 0) {
             if self.finished {
                 bail!("OpenRouter sent a choice after its finish reason");
             }
             if let Some(reason) = &choice.finish_reason {
-                if !matches!(reason.as_str(), "stop" | "tool_calls") {
-                    bail!("OpenRouter response did not finish successfully ({reason})");
-                }
+                self.finish_reason = match reason.as_str() {
+                    "stop" => super::FinishReason::Stop,
+                    "tool_calls" => super::FinishReason::ToolCalls,
+                    "length" => super::FinishReason::Length,
+                    "content_filter" => super::FinishReason::ContentFilter,
+                    _ => {
+                        return Err(super::ProviderError::Protocol(format!(
+                            "Unknown finish reason: {reason}"
+                        ))
+                        .into());
+                    }
+                };
                 self.finished = true;
             }
             let delta = choice.delta;
@@ -477,12 +517,28 @@ mod tests {
     }
 
     #[test]
+    fn preserves_usage_after_a_length_limited_stream_without_validating_partial_tools() -> Result<()>
+    {
+        let mut state = StreamCompletion::default();
+        state.push(&json!({"choices":[{"index":0,"finish_reason":"length","delta":{"tool_calls":[{"index":0,"function":{"arguments":"{"}}]}}]}).to_string(), None)?;
+        state.push(
+            &json!({"usage":{"prompt_tokens":123,"completion_tokens":45,"cost":0.02}}).to_string(),
+            None,
+        )?;
+        let result = state.push("[DONE]", None)?.context("completion")?;
+        assert_eq!(result.finish_reason, super::super::FinishReason::Length);
+        let usage = result.usage.context("usage")?;
+        assert_eq!(usage.input_tokens, 123);
+        assert_eq!(usage.output_tokens, 45);
+        Ok(())
+    }
+
+    #[test]
     fn rejects_errors_truncated_completions_and_unfinished_arguments() -> Result<()> {
         for data in [
             "not json",
             "[DONE]",
             r#"{"error":{"message":"upstream failure"}}"#,
-            r#"{"choices":[{"index":0,"finish_reason":"length"}]}"#,
         ] {
             assert!(StreamCompletion::default().push(data, None).is_err());
         }

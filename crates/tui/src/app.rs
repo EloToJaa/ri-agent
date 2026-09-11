@@ -150,6 +150,22 @@ impl App {
 
     pub fn event(&mut self, event: Event) {
         match event {
+            Event::ModelRequest {
+                usage,
+                finish_reason,
+                elapsed_ms,
+            } => {
+                if let Some(usage) = usage {
+                    self.append(
+                        "USAGE",
+                        &format!(
+                            "{} input / {} output tokens · {elapsed_ms} ms · {finish_reason:?}",
+                            usage.input_tokens, usage.output_tokens
+                        ),
+                        MUTED,
+                    );
+                }
+            }
             Event::Approval(request) => {
                 self.picker = None;
                 self.file_search = None;

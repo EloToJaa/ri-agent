@@ -33,24 +33,6 @@ const MAX_PROVIDER_ATTEMPTS: usize = 3;
 #[error("Maximum model turns ({0}) reached")]
 struct TurnLimitReached(usize);
 
-fn retryable_provider_error(error: &anyhow::Error) -> bool {
-    let text = format!("{error:#}").to_ascii_lowercase();
-    [
-        "timed out",
-        "timeout",
-        "connection",
-        "429",
-        "500",
-        "502",
-        "503",
-        "504",
-        "rate limit",
-        "temporarily unavailable",
-    ]
-    .iter()
-    .any(|marker| text.contains(marker))
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Selection {
     pub model: String,
@@ -82,6 +64,7 @@ pub struct Session {
     context_window: Option<NonZeroUsize>,
     response_reserve: NonZeroUsize,
     commands: Arc<tools::commands::Commands>,
+    metrics: std::sync::Mutex<crate::providers::Metrics>,
 }
 
 impl Session {
@@ -102,6 +85,7 @@ impl Session {
             context_window: None,
             response_reserve: NonZeroUsize::MIN.saturating_add(8191),
             commands: Arc::default(),
+            metrics: std::sync::Mutex::default(),
         }
     }
 
@@ -193,6 +177,12 @@ impl Session {
     }
     pub const fn status(&self) -> SessionStatus {
         self.status
+    }
+    pub fn metrics(&self) -> crate::providers::Metrics {
+        self.metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
     pub fn selection(&self) -> Selection {
         Selection {
@@ -380,6 +370,7 @@ impl Session {
     }
 
     pub fn clear(&mut self) {
+        self.metrics = std::sync::Mutex::default();
         self.commands = Arc::default();
         self.messages.clear();
         self.id = uuid::Uuid::new_v4().to_string();
@@ -415,6 +406,7 @@ impl Session {
         self.config.model = saved.selection.model;
         self.config.reasoning_effort = saved.selection.reasoning_effort;
         self.revision = saved.revision;
+        self.metrics = std::sync::Mutex::new(saved.metrics);
         self.status = if saved.interrupted {
             SessionStatus::Paused
         } else {
@@ -459,6 +451,7 @@ impl Session {
                 selection: self.selection(),
                 interrupted,
                 status: self.status,
+                metrics: self.metrics(),
                 messages: self.messages.clone(),
                 stable_len,
                 revision: self.revision,
@@ -510,7 +503,15 @@ impl Session {
         self.status = match &result {
             Ok(SubmitOutcome::Completed) => SessionStatus::Ready,
             Ok(SubmitOutcome::Cancelled) => SessionStatus::Paused,
-            Err(error) if error.downcast_ref::<TurnLimitReached>().is_some() => {
+            Err(error)
+                if error.downcast_ref::<TurnLimitReached>().is_some()
+                    || matches!(
+                        error.downcast_ref::<crate::providers::ProviderError>(),
+                        Some(crate::providers::ProviderError::Incomplete(
+                            crate::providers::FinishReason::Length
+                        ))
+                    ) =>
+            {
                 SessionStatus::Paused
             }
             Err(_) => SessionStatus::Failed,
@@ -569,6 +570,7 @@ impl Session {
                 model: &self.config.model,
                 tools: &definitions,
                 reasoning_effort: self.config.reasoning_effort,
+                max_output_tokens: self.response_reserve.get(),
             };
             // Hooks transform complete text. Do not display untransformed deltas.
             let response = match self.request_with_retry(request, cancellation).await {
@@ -610,9 +612,10 @@ impl Session {
         let mut attempt = 0;
         loop {
             attempt += 1;
+            let started = std::time::Instant::now();
             let result = tokio::select! {
                 biased;
-                () = cancellation.cancelled() => return Err(anyhow::anyhow!("Request cancelled")),
+                () = cancellation.cancelled() => Err(anyhow::anyhow!("Request cancelled")),
                 response = async {
                     if self.config.lua.has_after_response_hook {
                         self.provider.complete(request).await
@@ -621,12 +624,54 @@ impl Session {
                     }
                 } => response,
             };
+            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let usage = result
+                .as_ref()
+                .ok()
+                .and_then(|response| response.usage.clone());
+            let finish_reason = result.as_ref().ok().map(|response| response.finish_reason);
+            self.metrics
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .record(usage.as_ref(), elapsed_ms);
+            self.output.emit(Event::ModelRequest {
+                usage,
+                finish_reason,
+                elapsed_ms,
+            });
             match result {
-                Ok(response) => return Ok(response),
+                Ok(response) => {
+                    if matches!(
+                        response.finish_reason,
+                        crate::providers::FinishReason::Length
+                            | crate::providers::FinishReason::ContentFilter
+                            | crate::providers::FinishReason::Incomplete
+                    ) {
+                        return Err(crate::providers::ProviderError::Incomplete(
+                            response.finish_reason,
+                        )
+                        .into());
+                    }
+                    return Ok(response);
+                }
                 Err(error)
-                    if attempt < MAX_PROVIDER_ATTEMPTS && retryable_provider_error(&error) =>
+                    if attempt < MAX_PROVIDER_ATTEMPTS
+                        && error
+                            .downcast_ref::<crate::providers::ProviderError>()
+                            .is_some_and(crate::providers::ProviderError::retryable) =>
                 {
-                    let delay = std::time::Duration::from_millis(100 * (1_u64 << (attempt - 1)));
+                    let jitter =
+                        u64::try_from(uuid::Uuid::new_v4().as_u128() % 251).unwrap_or_default();
+                    let Some(delay) = error
+                        .downcast_ref::<crate::providers::ProviderError>()
+                        .and_then(|error| {
+                            error.retry_delay(attempt.try_into().unwrap_or(u32::MAX), jitter)
+                        })
+                    else {
+                        return Err(error)
+                            .context("Provider requested a longer retry delay; try again later");
+                    };
+                    self.output.emit(Event::AssistantAborted);
                     self.output.emit(Event::Progress(format!(
                         "Transient provider failure; retrying in {} ms ({}/{})...",
                         delay.as_millis(),
@@ -689,7 +734,11 @@ mod tests {
                 let attempt = *attempts;
                 drop(attempts);
                 if attempt < 3 {
-                    bail!("HTTP 503 service unavailable")
+                    return Err(crate::providers::ProviderError::Http {
+                        status: 503,
+                        retry_after: None,
+                    }
+                    .into());
                 }
                 Ok(serde_json::from_value(
                     serde_json::json!({"content":"Recovered"}),
@@ -799,6 +848,33 @@ mod tests {
             },
             output,
         ))
+    }
+
+    #[tokio::test]
+    async fn output_limit_pauses_without_executing_tools_and_saves_usage() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("must-not-exist");
+        let provider = Arc::new(CancellationProvider {
+            requests: std::sync::Mutex::default(),
+            pending: false,
+            first: serde_json::json!({"finish_reason":"length","usage":{"input_tokens":100,"output_tokens":50},"tool_calls":[{"id":"write","type":"function","function":{"name":"Write","arguments":serde_json::json!({"file_path":path,"content":"bad"}).to_string()}}]}),
+        });
+        let store =
+            SessionStore::open(directory.path().join("sessions.sqlite3"), directory.path())?;
+        let mut session =
+            cancellation_session(provider, Output::default())?.with_store(store.clone());
+        // Preserve an existing session so the failed initial response has a checkpoint.
+        session.messages.push(Message::User {
+            content: "previous task".into(),
+        });
+        assert!(session.submit("task".into()).await.is_err());
+        assert!(!path.exists());
+        assert_eq!(session.status(), SessionStatus::Paused);
+        let saved = store.load(session.id.clone()).await?;
+        assert_eq!(saved.metrics.requests, 1);
+        assert_eq!(saved.metrics.input_tokens, 100);
+        assert_eq!(saved.metrics.output_tokens, 50);
+        Ok(())
     }
 
     #[tokio::test]
